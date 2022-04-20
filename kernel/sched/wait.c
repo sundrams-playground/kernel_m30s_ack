@@ -13,6 +13,7 @@
 #include <linux/kthread.h>
 #include <linux/poll.h>
 #include <linux/freezer.h>
+#include <linux/poll.h>
 
 void __init_waitqueue_head(struct wait_queue_head *wq_head, const char *name, struct lock_class_key *key)
 {

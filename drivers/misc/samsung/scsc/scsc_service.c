@@ -803,7 +803,7 @@ struct scsc_service *scsc_mx_service_open(struct scsc_mx *mx, enum scsc_service_
 #ifdef CONFIG_ANDROID
 	wake_lock(&srvman->sm_wake_lock);
 #endif
-	if (srvman_start_not_allowed(srvman)) {
+	if (srvman_start_stop_not_allowed(srvman)) {
 		tval = ns_to_timeval(mxman->last_panic_time);
 		SCSC_TAG_ERR(MXMAN, "error: refused due to previous f/w failure scsc_panic_code=0x%x happened at [%6lu.%06ld]\n",
 				mxman->scsc_panic_code, tval.tv_sec, tval.tv_usec);
