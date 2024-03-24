@@ -35,8 +35,9 @@ lib-y := ctype.o string.o vsprintf.o cmdline.o \
 	 flex_proportions.o ratelimit.o show_mem.o \
 	 is_single_threaded.o plist.o decompress.o kobject_uevent.o \
 	 earlycpio.o seq_buf.o siphash.o \
-	 nmi_backtrace.o nodemask.o win_minmax.o
+	 nodemask.o win_minmax.o
 
+lib-$(!CONFIG_ARM64) += nmi_backtrace.o
 lib-$(CONFIG_MMU) += ioremap.o
 lib-$(CONFIG_SMP) += cpumask.o
 lib-$(CONFIG_DMA_NOOP_OPS) += dma-noop.o
@@ -260,5 +261,8 @@ KASAN_SANITIZE_ubsan.o := n
 CFLAGS_ubsan.o := $(call cc-option, -fno-stack-protector) $(DISABLE_STACKLEAK_PLUGIN)
 
 obj-$(CONFIG_SBITMAP) += sbitmap.o
-
+obj-$(CONFIG_FFSI) += ffsi.o
 obj-$(CONFIG_PARMAN) += parman.o
+
+obj-$(CONFIG_DEBUG_SNAPSHOT) += debug-snapshot.o debug-snapshot-log.o debug-snapshot-utils.o \
+				debug-snapshot-pstore.o debug-snapshot-sysfs.o debug-snapshot-helper.o

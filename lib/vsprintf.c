@@ -33,8 +33,6 @@
 #include <linux/uuid.h>
 #include <linux/of.h>
 #include <net/addrconf.h>
-#include <linux/siphash.h>
-#include <linux/compiler.h>
 #ifdef CONFIG_BLOCK
 #include <linux/blkdev.h>
 #endif
@@ -337,7 +335,7 @@ char *put_dec(char *buf, unsigned long long n)
  *
  * If speed is not important, use snprintf(). It's easy to read the code.
  */
-int num_to_str(char *buf, int size, unsigned long long num)
+int num_to_str(char *buf, int size, unsigned long long num, unsigned int width)
 {
 	/* put_dec requires 2-byte alignment of the buffer. */
 	char tmp[sizeof(num) * 3] __aligned(2);
@@ -351,11 +349,21 @@ int num_to_str(char *buf, int size, unsigned long long num)
 		len = put_dec(tmp, num) - tmp;
 	}
 
-	if (len > size)
+	if (len > size || width > size)
 		return 0;
+
+	if (width > len) {
+		width = width - len;
+		for (idx = 0; idx < width; idx++)
+			buf[idx] = ' ';
+	} else {
+		width = 0;
+	}
+
 	for (idx = 0; idx < len; ++idx)
-		buf[idx] = tmp[len - idx - 1];
-	return len;
+		buf[idx + width] = tmp[len - idx - 1];
+
+	return len + width;
 }
 
 #define SIGN	1		/* unsigned/signed, must be 1 */
@@ -604,92 +612,6 @@ char *string(char *buf, char *end, const char *s, struct printf_spec spec)
 }
 
 static noinline_for_stack
-char *pointer_string(char *buf, char *end, const void *ptr,
-		     struct printf_spec spec)
-{
-	spec.base = 16;
-	spec.flags |= SMALL;
-	if (spec.field_width == -1) {
-		spec.field_width = 2 * sizeof(ptr);
-		spec.flags |= ZEROPAD;
-	}
-
-	return number(buf, end, (unsigned long int)ptr, spec);
-}
-
-static DEFINE_STATIC_KEY_TRUE(not_filled_random_ptr_key);
-static siphash_key_t ptr_key __read_mostly;
-
-static void enable_ptr_key_workfn(struct work_struct *work)
-{
-	get_random_bytes(&ptr_key, sizeof(ptr_key));
-	/* Needs to run from preemptible context */
-	static_branch_disable(&not_filled_random_ptr_key);
-}
-
-static DECLARE_WORK(enable_ptr_key_work, enable_ptr_key_workfn);
-
-static void fill_random_ptr_key(struct random_ready_callback *unused)
-{
-	/* This may be in an interrupt handler. */
-	queue_work(system_unbound_wq, &enable_ptr_key_work);
-}
-
-static struct random_ready_callback random_ready = {
-	.func = fill_random_ptr_key
-};
-
-static int __init initialize_ptr_random(void)
-{
-	int ret = add_random_ready_callback(&random_ready);
-
-	if (!ret) {
-		return 0;
-	} else if (ret == -EALREADY) {
-		/* This is in preemptible context */
-		enable_ptr_key_workfn(&enable_ptr_key_work);
-		return 0;
-	}
-
-	return ret;
-}
-early_initcall(initialize_ptr_random);
-
-/* Maps a pointer to a 32 bit unique identifier. */
-static char *ptr_to_id(char *buf, char *end, const void *ptr,
-		       struct printf_spec spec)
-{
-	unsigned long hashval;
-	const int default_width = 2 * sizeof(ptr);
-
-	if (static_branch_unlikely(&not_filled_random_ptr_key)) {
-		spec.field_width = default_width;
-		/* string length must be less than default_width */
-		return string(buf, end, "(ptrval)", spec);
-	}
-
-#ifdef CONFIG_64BIT
-	hashval = (unsigned long)siphash_1u64((u64)ptr, &ptr_key);
-	/*
-	 * Mask off the first 32 bits, this makes explicit that we have
-	 * modified the address (and 32 bits is plenty for a unique ID).
-	 */
-	hashval = hashval & 0xffffffff;
-#else
-	hashval = (unsigned long)siphash_1u32((u32)ptr, &ptr_key);
-#endif
-
-	spec.flags |= SMALL;
-	if (spec.field_width == -1) {
-		spec.field_width = default_width;
-		spec.flags |= ZEROPAD;
-	}
-	spec.base = 16;
-
-	return number(buf, end, hashval, spec);
-}
-
-static noinline_for_stack
 char *dentry_name(char *buf, char *end, const struct dentry *d, struct printf_spec spec,
 		  const char *fmt)
 {
@@ -708,8 +630,8 @@ char *dentry_name(char *buf, char *end, const struct dentry *d, struct printf_sp
 
 	rcu_read_lock();
 	for (i = 0; i < depth; i++, d = p) {
-		p = ACCESS_ONCE(d->d_parent);
-		array[i] = ACCESS_ONCE(d->d_name.name);
+		p = READ_ONCE(d->d_parent);
+		array[i] = READ_ONCE(d->d_name.name);
 		if (p == d) {
 			if (i)
 				array[i] = "";
@@ -1431,62 +1353,8 @@ char *uuid_string(char *buf, char *end, const u8 *addr,
 	return string(buf, end, uuid, spec);
 }
 
-int kptr_restrict __read_mostly;
-
 static noinline_for_stack
-char *restricted_pointer(char *buf, char *end, const void *ptr,
-			 struct printf_spec spec)
-{
-	spec.base = 16;
-	spec.flags |= SMALL;
-	if (spec.field_width == -1) {
-		spec.field_width = 2 * sizeof(ptr);
-		spec.flags |= ZEROPAD;
-	}
-
-	switch (kptr_restrict) {
-	case 0:
-		/* Always print %pK values */
-		break;
-	case 1: {
-		const struct cred *cred;
-
-		/*
-		 * kptr_restrict==1 cannot be used in IRQ context
-		 * because its test for CAP_SYSLOG would be meaningless.
-		 */
-		if (in_irq() || in_serving_softirq() || in_nmi())
-			return string(buf, end, "pK-error", spec);
-
-		/*
-		 * Only print the real pointer value if the current
-		 * process has CAP_SYSLOG and is running with the
-		 * same credentials it started with. This is because
-		 * access to files is checked at open() time, but %pK
-		 * checks permission at read() time. We don't want to
-		 * leak pointer values if a binary opens a file using
-		 * %pK and then elevates privileges before reading it.
-		 */
-		cred = current_cred();
-		if (!has_capability_noaudit(current, CAP_SYSLOG) ||
-		    !uid_eq(cred->euid, cred->uid) ||
-		    !gid_eq(cred->egid, cred->gid))
-			ptr = NULL;
-		break;
-	}
-	case 2:
-	default:
-		/* Always print 0's for %pK */
-		ptr = NULL;
-		break;
-	}
-
-	return number(buf, end, (unsigned long)ptr, spec);
-}
-
-static noinline_for_stack
-char *netdev_bits(char *buf, char *end, const void *addr,
-		  struct printf_spec spec,  const char *fmt)
+char *netdev_bits(char *buf, char *end, const void *addr, const char *fmt)
 {
 	unsigned long long num;
 	int size;
@@ -1497,7 +1365,9 @@ char *netdev_bits(char *buf, char *end, const void *addr,
 		size = sizeof(netdev_features_t);
 		break;
 	default:
-		return ptr_to_id(buf, end, addr, spec);
+		num = (unsigned long)addr;
+		size = sizeof(unsigned long);
+		break;
 	}
 
 	return special_hex_number(buf, end, num, size);
@@ -1728,6 +1598,8 @@ char *device_node_string(char *buf, char *end, struct device_node *dn,
 	return widen_string(buf, buf - buf_start, end, spec);
 }
 
+int kptr_restrict __read_mostly = 4;
+
 /*
  * Show a '%p' thing.  A kernel extension is that the '%p' is followed
  * by an extra set of alphanumeric characters that are extended format
@@ -1833,16 +1705,11 @@ char *device_node_string(char *buf, char *end, struct device_node *dn,
  *                        c major compatible string
  *                        C full compatible string
  *
- * - 'x' For printing the address. Equivalent to "%lx".
- *
  * ** Please update also Documentation/printk-formats.txt when making changes **
  *
  * Note: The difference between 'S' and 'F' is that on ia64 and ppc64
  * function pointers are really function descriptors, which contain a
  * pointer to the real address.
- *
- * Note: The default behaviour (unadorned %p) is to hash the address,
- * rendering it useful as a unique identifier.
  */
 static noinline_for_stack
 char *pointer(const char *fmt, char *buf, char *end, void *ptr,
@@ -1932,9 +1799,49 @@ char *pointer(const char *fmt, char *buf, char *end, void *ptr,
 			return buf;
 		}
 	case 'K':
-		return restricted_pointer(buf, end, ptr, spec);
+		switch (kptr_restrict) {
+		case 0:
+			/* Always print %pK values */
+			break;
+		case 1: {
+			const struct cred *cred;
+
+			/*
+			 * kptr_restrict==1 cannot be used in IRQ context
+			 * because its test for CAP_SYSLOG would be meaningless.
+			 */
+			if (in_irq() || in_serving_softirq() || in_nmi()) {
+				if (spec.field_width == -1)
+					spec.field_width = default_width;
+				return string(buf, end, "pK-error", spec);
+			}
+
+			/*
+			 * Only print the real pointer value if the current
+			 * process has CAP_SYSLOG and is running with the
+			 * same credentials it started with. This is because
+			 * access to files is checked at open() time, but %pK
+			 * checks permission at read() time. We don't want to
+			 * leak pointer values if a binary opens a file using
+			 * %pK and then elevates privileges before reading it.
+			 */
+			cred = current_cred();
+			if (!has_capability_noaudit(current, CAP_SYSLOG) ||
+			    !uid_eq(cred->euid, cred->uid) ||
+			    !gid_eq(cred->egid, cred->gid))
+				ptr = NULL;
+			break;
+		}
+		case 2:
+		default:
+			/* Always print 0's for %pK */
+			ptr = NULL;
+			break;
+		}
+		break;
+
 	case 'N':
-		return netdev_bits(buf, end, ptr, spec, fmt);
+		return netdev_bits(buf, end, ptr, fmt);
 	case 'a':
 		return address_val(buf, end, ptr, fmt);
 	case 'd':
@@ -1957,13 +1864,15 @@ char *pointer(const char *fmt, char *buf, char *end, void *ptr,
 		case 'F':
 			return device_node_string(buf, end, ptr, spec, fmt + 1);
 		}
-		break;
-	case 'x':
-		return pointer_string(buf, end, ptr, spec);
 	}
+	spec.flags |= SMALL;
+	if (spec.field_width == -1) {
+		spec.field_width = default_width;
+		spec.flags |= ZEROPAD;
+	}
+	spec.base = 16;
 
-	/* default is to _not_ leak addresses, hash before printing */
-	return ptr_to_id(buf, end, ptr, spec);
+	return number(buf, end, (unsigned long) ptr, spec);
 }
 
 /*
