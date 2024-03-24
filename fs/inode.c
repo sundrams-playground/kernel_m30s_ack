@@ -183,6 +183,9 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	mapping_set_gfp_mask(mapping, GFP_HIGHUSER_MOVABLE);
 	mapping->private_data = NULL;
 	mapping->writeback_index = 0;
+#if defined(CONFIG_SDP) && !defined(CONFIG_FSCRYPT_SDP)
+	mapping->userid = 0;
+#endif
 	inode->i_private = NULL;
 	inode->i_mapping = mapping;
 	INIT_HLIST_HEAD(&inode->i_dentry);	/* buggered by rcu freeing */
@@ -1864,6 +1867,7 @@ int file_update_time(struct file *file)
 	struct inode *inode = file_inode(file);
 	struct timespec now;
 	int sync_it = 0;
+	int need_sync = 0;
 	int ret;
 
 	/* First try to exhaust all avenues to not sync */
@@ -1877,7 +1881,19 @@ int file_update_time(struct file *file)
 	if (!timespec_equal(&inode->i_ctime, &now))
 		sync_it |= S_CTIME;
 
-	if (IS_I_VERSION(inode))
+	/* iversion impacts on "write" performance. This code just filter inodes
+	 * by presence in integrity cache (S_IMA flag, security/integrity/iint.c).
+	 * Because only FIVE uses iversion in Samsung Kernel this patch shouldn't
+	 * affect other code.
+	 * NOTICE: iversion code has been optimized in v4.17-rc4. So this patch should be
+	 * removed since v4.17-rc4
+	 */
+	#ifdef CONFIG_FIVE
+	need_sync = IS_I_VERSION(inode) && (inode->i_flags & S_IMA);
+	#else
+	need_sync = IS_I_VERSION(inode);
+	#endif
+	if (need_sync)
 		sync_it |= S_VERSION;
 
 	if (!sync_it)
@@ -2110,7 +2126,7 @@ void inode_set_flags(struct inode *inode, unsigned int flags,
 
 	WARN_ON_ONCE(flags & ~mask);
 	do {
-		old_flags = ACCESS_ONCE(inode->i_flags);
+		old_flags = READ_ONCE(inode->i_flags);
 		new_flags = (old_flags & ~mask) | flags;
 	} while (unlikely(cmpxchg(&inode->i_flags, old_flags,
 				  new_flags) != old_flags));
@@ -2123,25 +2139,3 @@ void inode_nohighmem(struct inode *inode)
 }
 EXPORT_SYMBOL(inode_nohighmem);
 
-/**
- * current_time - Return FS time
- * @inode: inode.
- *
- * Return the current time truncated to the time granularity supported by
- * the fs.
- *
- * Note that inode and inode->sb cannot be NULL.
- * Otherwise, the function warns and returns time without truncation.
- */
-struct timespec current_time(struct inode *inode)
-{
-	struct timespec now = current_kernel_time();
-
-	if (unlikely(!inode->i_sb)) {
-		WARN(1, "current_time() called with uninitialized super_block in the inode");
-		return now;
-	}
-
-	return timespec_trunc(now, inode->i_sb->s_time_gran);
-}
-EXPORT_SYMBOL(current_time);

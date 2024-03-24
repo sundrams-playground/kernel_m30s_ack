@@ -46,26 +46,19 @@
 #include <linux/cleancache.h>
 
 #include "ext4.h"
-#include <trace/events/android_fs.h>
 
 static inline bool ext4_bio_encrypted(struct bio *bio)
 {
 #ifdef CONFIG_EXT4_FS_ENCRYPTION
+#ifdef CONFIG_FS_INLINE_ENCRYPTION
+	/* REQ_CRYPT is used for inline encryption */
+	if (bio->bi_opf & REQ_CRYPT)
+		return false;
+#endif
 	return unlikely(bio->bi_private != NULL);
 #else
 	return false;
 #endif
-}
-
-static void
-ext4_trace_read_completion(struct bio *bio)
-{
-	struct page *first_page = bio->bi_io_vec[0].bv_page;
-
-	if (first_page != NULL)
-		trace_android_fs_dataread_end(first_page->mapping->host,
-					      page_offset(first_page),
-					      bio->bi_iter.bi_size);
 }
 
 /*
@@ -84,9 +77,6 @@ static void mpage_end_io(struct bio *bio)
 {
 	struct bio_vec *bv;
 	int i;
-
-	if (trace_android_fs_dataread_start_enabled())
-		ext4_trace_read_completion(bio);
 
 	if (ext4_bio_encrypted(bio)) {
 		if (bio->bi_status) {
@@ -111,29 +101,18 @@ static void mpage_end_io(struct bio *bio)
 	bio_put(bio);
 }
 
-static void
-ext4_submit_bio_read(struct bio *bio)
+#ifdef CONFIG_DDAR
+static int ext4_dd_submit_bio_read(struct inode *inode, struct bio *bio)
 {
-	if (trace_android_fs_dataread_start_enabled()) {
-		struct page *first_page = bio->bi_io_vec[0].bv_page;
+	if (!fscrypt_dd_encrypted_inode(inode))
+		return -EOPNOTSUPP;
 
-		if (first_page != NULL) {
-			char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
-
-			path = android_fstrace_get_pathname(pathbuf,
-						    MAX_TRACE_PATHBUF_LEN,
-						    first_page->mapping->host);
-			trace_android_fs_dataread_start(
-				first_page->mapping->host,
-				page_offset(first_page),
-				bio->bi_iter.bi_size,
-				current->pid,
-				path,
-				current->comm);
-		}
-	}
-	submit_bio(bio);
+	fscrypt_dd_submit_bio(inode, bio);
+	return 0;
 }
+#else
+static inline int ext4_dd_submit_bio_read(struct inode *inode, struct bio *bio) { return -EOPNOTSUPP; }
+#endif
 
 int ext4_mpage_readpages(struct address_space *mapping,
 			 struct list_head *pages, struct page *page,
@@ -275,14 +254,16 @@ int ext4_mpage_readpages(struct address_space *mapping,
 		 */
 		if (bio && (last_block_in_bio != blocks[0] - 1)) {
 		submit_and_realloc:
-			ext4_submit_bio_read(bio);
+			if (ext4_dd_submit_bio_read(inode, bio) == -EOPNOTSUPP)
+				submit_bio(bio);
 			bio = NULL;
 		}
 		if (bio == NULL) {
 			struct fscrypt_ctx *ctx = NULL;
 
 			if (ext4_encrypted_inode(inode) &&
-			    S_ISREG(inode->i_mode)) {
+			    S_ISREG(inode->i_mode) &&
+			    !fscrypt_inline_encrypted(inode)) {
 				ctx = fscrypt_get_ctx(inode, GFP_NOFS);
 				if (IS_ERR(ctx))
 					goto set_error_page;
@@ -299,6 +280,12 @@ int ext4_mpage_readpages(struct address_space *mapping,
 			bio->bi_end_io = mpage_end_io;
 			bio->bi_private = ctx;
 			bio_set_op_attrs(bio, REQ_OP_READ, 0);
+			if (fscrypt_inline_encrypted(inode)) {
+				fscrypt_set_bio_cryptd(inode, bio);
+#if defined(CONFIG_CRYPTO_DISKCIPHER_DEBUG)
+				crypto_diskcipher_debug(FS_READP, bio->bi_opf);
+#endif
+			}
 		}
 
 		length = first_hole << blkbits;
@@ -308,14 +295,16 @@ int ext4_mpage_readpages(struct address_space *mapping,
 		if (((map.m_flags & EXT4_MAP_BOUNDARY) &&
 		     (relative_block == map.m_len)) ||
 		    (first_hole != blocks_per_page)) {
-			ext4_submit_bio_read(bio);
+			if (ext4_dd_submit_bio_read(inode, bio) == -EOPNOTSUPP)
+				submit_bio(bio);
 			bio = NULL;
 		} else
 			last_block_in_bio = blocks[blocks_per_page - 1];
 		goto next_page;
 	confused:
 		if (bio) {
-			ext4_submit_bio_read(bio);
+			if (ext4_dd_submit_bio_read(inode, bio) == -EOPNOTSUPP)
+				submit_bio(bio);
 			bio = NULL;
 		}
 		if (!PageUptodate(page))
@@ -328,6 +317,7 @@ int ext4_mpage_readpages(struct address_space *mapping,
 	}
 	BUG_ON(pages && !list_empty(pages));
 	if (bio)
-		ext4_submit_bio_read(bio);
+		if (ext4_dd_submit_bio_read(inode, bio) == -EOPNOTSUPP)
+			submit_bio(bio);
 	return 0;
 }

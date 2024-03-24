@@ -38,6 +38,9 @@
 #include <linux/atomic.h>
 #include <linux/prefetch.h>
 
+#define __FS_HAS_ENCRYPTION IS_ENABLED(CONFIG_FS_ENCRYPTION)
+#include <linux/fscrypt.h>
+
 /*
  * How many user pages to map in one call to get_user_pages().  This determines
  * the size of a structure in the slab cache
@@ -469,6 +472,17 @@ static inline void dio_bio_submit(struct dio *dio, struct dio_submit *sdio)
 	spin_lock_irqsave(&dio->bio_lock, flags);
 	dio->refcount++;
 	spin_unlock_irqrestore(&dio->bio_lock, flags);
+
+#if defined(CONFIG_FS_INLINE_ENCRYPTION)
+	if (fscrypt_inline_encrypted(dio->inode)) {
+		fscrypt_set_bio_cryptd_dun(dio->inode, bio,
+				fscrypt_get_dun(dio->inode,
+				(sdio->logical_offset_in_bio >> PAGE_SHIFT)));
+#if defined(CONFIG_CRYPTO_DISKCIPHER_DEBUG)
+		crypto_diskcipher_debug(FS_DIO, bio->bi_opf);
+#endif
+	}
+#endif
 
 	if (dio->is_async && dio->op == REQ_OP_READ && dio->should_dirty)
 		bio_set_pages_dirty(bio);
@@ -1175,7 +1189,7 @@ do_blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 		      get_block_t get_block, dio_iodone_t end_io,
 		      dio_submit_t submit_io, int flags)
 {
-	unsigned i_blkbits = ACCESS_ONCE(inode->i_blkbits);
+	unsigned i_blkbits = READ_ONCE(inode->i_blkbits);
 	unsigned blkbits = i_blkbits;
 	unsigned blocksize_mask = (1 << blkbits) - 1;
 	ssize_t retval = -EINVAL;

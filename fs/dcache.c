@@ -43,6 +43,10 @@
 #include "internal.h"
 #include "mount.h"
 
+#ifdef CONFIG_RKP_NS_PROT
+u8 ns_prot = 0;
+#endif
+
 /*
  * Usage:
  * dcache->d_inode->i_lock protects:
@@ -2141,6 +2145,48 @@ static inline bool d_same_name(const struct dentry *dentry,
 				       name) == 0;
 }
 
+/*
+ * This is __d_lookup_rcu() when the parent dentry has
+ * DCACHE_OP_COMPARE, which makes things much nastier.
+ */
+static noinline struct dentry *__d_lookup_rcu_op_compare(
+	const struct dentry *parent,
+	const struct qstr *name,
+	unsigned *seqp)
+{
+	u64 hashlen = name->hash_len;
+	struct hlist_bl_head *b = d_hash(hashlen_hash(hashlen));
+	struct hlist_bl_node *node;
+	struct dentry *dentry;
+
+	hlist_bl_for_each_entry_rcu(dentry, node, b, d_hash) {
+		int tlen;
+		const char *tname;
+		unsigned seq;
+
+seqretry:
+		seq = raw_seqcount_begin(&dentry->d_seq);
+		if (dentry->d_parent != parent)
+			continue;
+		if (d_unhashed(dentry))
+			continue;
+		if (dentry->d_name.hash != hashlen_hash(hashlen))
+			continue;
+		tlen = dentry->d_name.len;
+		tname = dentry->d_name.name;
+		/* we want a consistent (name,len) pair */
+		if (read_seqcount_retry(&dentry->d_seq, seq)) {
+			cpu_relax();
+			goto seqretry;
+		}
+		if (parent->d_op->d_compare(dentry, tlen, tname, name) != 0)
+			continue;
+		*seqp = seq;
+		return dentry;
+	}
+	return NULL;
+}
+
 /**
  * __d_lookup_rcu - search for a dentry (racy, store-free)
  * @parent: parent dentry
@@ -2187,6 +2233,9 @@ struct dentry *__d_lookup_rcu(const struct dentry *parent,
 	 * Keep the two functions in sync.
 	 */
 
+	if (unlikely(parent->d_flags & DCACHE_OP_COMPARE))
+		return __d_lookup_rcu_op_compare(parent, name, seqp);
+
 	/*
 	 * The hash list is protected using RCU.
 	 *
@@ -2203,7 +2252,6 @@ struct dentry *__d_lookup_rcu(const struct dentry *parent,
 	hlist_bl_for_each_entry_rcu(dentry, node, b, d_hash) {
 		unsigned seq;
 
-seqretry:
 		/*
 		 * The dentry sequence count protects us from concurrent
 		 * renames, and thus protects parent and name fields.
@@ -2226,28 +2274,10 @@ seqretry:
 			continue;
 		if (d_unhashed(dentry))
 			continue;
-
-		if (unlikely(parent->d_flags & DCACHE_OP_COMPARE)) {
-			int tlen;
-			const char *tname;
-			if (dentry->d_name.hash != hashlen_hash(hashlen))
-				continue;
-			tlen = dentry->d_name.len;
-			tname = dentry->d_name.name;
-			/* we want a consistent (name,len) pair */
-			if (read_seqcount_retry(&dentry->d_seq, seq)) {
-				cpu_relax();
-				goto seqretry;
-			}
-			if (parent->d_op->d_compare(dentry,
-						    tlen, tname, name) != 0)
-				continue;
-		} else {
-			if (dentry->d_name.hash_len != hashlen)
-				continue;
-			if (dentry_cmp(dentry, str, hashlen_len(hashlen)) != 0)
-				continue;
-		}
+		if (dentry->d_name.hash_len != hashlen)
+			continue;
+		if (dentry_cmp(dentry, str, hashlen_len(hashlen)) != 0)
+			continue;
 		*seqp = seq;
 		return dentry;
 	}
@@ -3121,12 +3151,7 @@ static int prepend_name(char **buffer, int *buflen, const struct qstr *name)
 		return -ENAMETOOLONG;
 	p = *buffer -= dlen + 1;
 	*p++ = '/';
-	while (dlen--) {
-		char c = *dname++;
-		if (!c)
-			break;
-		*p++ = c;
-	}
+	memcpy(p, dname, dlen);
 	return 0;
 }
 
@@ -3188,7 +3213,11 @@ restart:
 			if (mnt != parent) {
 				dentry = ACCESS_ONCE(mnt->mnt_mountpoint);
 				mnt = parent;
+#ifdef CONFIG_RKP_NS_PROT
+				vfsmnt = mnt->mnt;
+#else
 				vfsmnt = &mnt->mnt;
+#endif
 				continue;
 			}
 			if (!error)
@@ -3692,8 +3721,10 @@ void __init vfs_caches_init_early(void)
 	for (i = 0; i < ARRAY_SIZE(in_lookup_hashtable); i++)
 		INIT_HLIST_BL_HEAD(&in_lookup_hashtable[i]);
 
+	set_memsize_kernel_type(MEMSIZE_KERNEL_VFSHASH);
 	dcache_init_early();
 	inode_init_early();
+	set_memsize_kernel_type(MEMSIZE_KERNEL_OTHERS);
 }
 
 void __init vfs_caches_init(void)
@@ -3708,4 +3739,7 @@ void __init vfs_caches_init(void)
 	mnt_init();
 	bdev_cache_init();
 	chrdev_init();
+#ifdef CONFIG_RKP_NS_PROT
+	ns_prot = 1;
+#endif
 }

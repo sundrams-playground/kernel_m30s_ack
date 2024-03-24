@@ -92,7 +92,7 @@ static int parse_options(struct super_block *sb, char *options, int silent,
 
 		switch (token) {
 		case Opt_debug:
-			*debug = 1;
+			*debug = 0;
 			break;
 		case Opt_fsuid:
 			if (match_int(&args[0], &option))
@@ -179,7 +179,7 @@ int parse_options_remount(struct super_block *sb, char *options, int silent,
 
 		switch (token) {
 		case Opt_debug:
-			debug = 1;
+			debug = 0;
 			break;
 		case Opt_gid:
 			if (match_int(&args[0], &option))
@@ -278,7 +278,6 @@ static int sdcardfs_read_super(struct vfsmount *mnt, struct super_block *sb,
 
 	pr_info("sdcardfs: dev_name -> %s\n", dev_name);
 	pr_info("sdcardfs: options -> %s\n", (char *)raw_data);
-	pr_info("sdcardfs: mnt -> %p\n", mnt);
 
 	/* parse lower path */
 	err = kern_path(dev_name, LOOKUP_FOLLOW | LOOKUP_DIRECTORY,
@@ -308,6 +307,12 @@ static int sdcardfs_read_super(struct vfsmount *mnt, struct super_block *sb,
 	lower_sb = lower_path.dentry->d_sb;
 	atomic_inc(&lower_sb->s_active);
 	sdcardfs_set_lower_super(sb, lower_sb);
+
+#if ANDROID_VERSION == 90000
+	if (lower_sb->s_magic != EXT4_SUPER_MAGIC &&
+			lower_sb->s_magic != F2FS_SUPER_MAGIC)
+		sb_info->options.nocache = true;
+#endif
 
 	sb->s_stack_depth = lower_sb->s_stack_depth + 1;
 	if (sb->s_stack_depth > FILESYSTEM_MAX_STACK_DEPTH) {
@@ -468,6 +473,12 @@ static int __init init_sdcardfs_fs(void)
 
 	pr_info("Registering sdcardfs " SDCARDFS_VERSION "\n");
 
+	kmem_file_info_pool = KMEM_CACHE(sdcardfs_file_info, SLAB_HWCACHE_ALIGN);
+	if (!kmem_file_info_pool) {
+		err = -ENOMEM;
+		goto err;
+	}
+
 	err = sdcardfs_init_inode_cache();
 	if (err)
 		goto out;
@@ -484,6 +495,7 @@ out:
 		sdcardfs_destroy_dentry_cache();
 		packagelist_exit();
 	}
+err:
 	return err;
 }
 
@@ -493,6 +505,7 @@ static void __exit exit_sdcardfs_fs(void)
 	sdcardfs_destroy_dentry_cache();
 	packagelist_exit();
 	unregister_filesystem(&sdcardfs_fs_type);
+	kmem_cache_destroy(kmem_file_info_pool);
 	pr_info("Completed sdcardfs module unload\n");
 }
 

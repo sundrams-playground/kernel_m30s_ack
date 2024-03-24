@@ -364,8 +364,7 @@ static int squashfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_files = msblk->inodes;
 	buf->f_ffree = 0;
 	buf->f_namelen = SQUASHFS_NAME_LEN;
-	buf->f_fsid.val[0] = (u32)id;
-	buf->f_fsid.val[1] = (u32)(id >> 32);
+	buf->f_fsid = u64_to_fsid(id);
 
 	return 0;
 }
@@ -445,9 +444,15 @@ static int __init init_squashfs_fs(void)
 	if (err)
 		return err;
 
+	if (!squashfs_init_read_wq()) {
+		destroy_inodecache();
+		return -ENOMEM;
+	}
+
 	err = register_filesystem(&squashfs_fs_type);
 	if (err) {
 		destroy_inodecache();
+		squashfs_destroy_read_wq();
 		return err;
 	}
 
@@ -461,6 +466,7 @@ static void __exit exit_squashfs_fs(void)
 {
 	unregister_filesystem(&squashfs_fs_type);
 	destroy_inodecache();
+	squashfs_destroy_read_wq();
 }
 
 

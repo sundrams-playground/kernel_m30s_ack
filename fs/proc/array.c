@@ -142,25 +142,12 @@ static inline const char *get_task_state(struct task_struct *tsk)
 	return task_state_array[__get_task_state(tsk)];
 }
 
-static inline int get_task_umask(struct task_struct *tsk)
-{
-	struct fs_struct *fs;
-	int umask = -ENOENT;
-
-	task_lock(tsk);
-	fs = tsk->fs;
-	if (fs)
-		umask = fs->umask;
-	task_unlock(tsk);
-	return umask;
-}
-
 static inline void task_state(struct seq_file *m, struct pid_namespace *ns,
 				struct pid *pid, struct task_struct *p)
 {
 	struct user_namespace *user_ns = seq_user_ns(m);
 	struct group_info *group_info;
-	int g, umask;
+	int g, umask = -1;
 	struct task_struct *tracer;
 	const struct cred *cred;
 	pid_t ppid, tpid = 0, tgid, ngid;
@@ -178,17 +165,18 @@ static inline void task_state(struct seq_file *m, struct pid_namespace *ns,
 	ngid = task_numa_group_id(p);
 	cred = get_task_cred(p);
 
-	umask = get_task_umask(p);
-	if (umask >= 0)
-		seq_printf(m, "Umask:\t%#04o\n", umask);
-
 	task_lock(p);
+	if (p->fs)
+		umask = p->fs->umask;
 	if (p->files)
 		max_fds = files_fdtable(p->files)->max_fds;
 	task_unlock(p);
 	rcu_read_unlock();
 
-	seq_printf(m, "State:\t%s", get_task_state(p));
+	if (umask >= 0)
+		seq_printf(m, "Umask:\t%#04o\n", umask);
+	seq_puts(m, "State:\t");
+	seq_puts(m, get_task_state(p));
 
 	seq_put_decimal_ull(m, "\nTgid:\t", tgid);
 	seq_put_decimal_ull(m, "\nNgid:\t", ngid);
@@ -314,8 +302,8 @@ static void render_cap_t(struct seq_file *m, const char *header,
 
 	seq_puts(m, header);
 	CAP_FOR_EACH_U32(__capi) {
-		seq_printf(m, "%08x",
-			   a->cap[CAP_LAST_U32 - __capi]);
+		seq_put_hex_ll(m, NULL,
+			   a->cap[CAP_LAST_U32 - __capi], 8);
 	}
 	seq_putc(m, '\n');
 }
@@ -386,9 +374,9 @@ static inline void task_context_switch_counts(struct seq_file *m,
 static void task_cpus_allowed(struct seq_file *m, struct task_struct *task)
 {
 	seq_printf(m, "Cpus_allowed:\t%*pb\n",
-		   cpumask_pr_args(&task->cpus_allowed));
+		   cpumask_pr_args(task->cpus_ptr));
 	seq_printf(m, "Cpus_allowed_list:\t%*pbl\n",
-		   cpumask_pr_args(&task->cpus_allowed));
+		   cpumask_pr_args(task->cpus_ptr));
 }
 
 int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
@@ -482,7 +470,7 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 		cutime = sig->cutime;
 		cstime = sig->cstime;
 		cgtime = sig->cgtime;
-		rsslim = ACCESS_ONCE(sig->rlim[RLIMIT_RSS].rlim_cur);
+		rsslim = READ_ONCE(sig->rlim[RLIMIT_RSS].rlim_cur);
 
 		/* add up live thread stats at the group level */
 		if (whole) {
@@ -523,7 +511,11 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 	/* convert nsec -> ticks */
 	start_time = nsec_to_clock_t(task->real_start_time);
 
-	seq_printf(m, "%d (%s) %c", pid_nr_ns(pid, ns), tcomm, state);
+	seq_put_decimal_ull(m, "", pid_nr_ns(pid, ns));
+	seq_puts(m, " (");
+	seq_puts(m, tcomm);
+	seq_puts(m, ") ");
+	seq_putc(m, state);
 	seq_put_decimal_ll(m, " ", ppid);
 	seq_put_decimal_ll(m, " ", pgid);
 	seq_put_decimal_ll(m, " ", sid);
@@ -643,7 +635,30 @@ int proc_pid_statm(struct seq_file *m, struct pid_namespace *ns,
 
 	return 0;
 }
+int proc_pid_statlmkd(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
+{
+	struct mm_struct *mm = get_task_mm(task);
+#ifdef CONFIG_MMU
+	unsigned long size = 0, resident = 0, swapresident = 0;
+	if (mm) {
+		task_statlmkd(mm, &size, &resident, &swapresident);
+		mmput(mm);
+	}
+#else
+	unsigned long size = 0, resident = 0, shared = 0, text = 0, data = 0;
+	if (mm) {
+		size = task_statm(mm, &shared, &text, &data, &resident);
+		mmput(mm);
+	}
+#endif
+	seq_put_decimal_ull(m, "", size);
+	seq_put_decimal_ull(m, " ", resident);
+	seq_put_decimal_ull(m, " ", swapresident);
+	seq_putc(m, '\n');
 
+	return 0;
+}
 #ifdef CONFIG_PROC_CHILDREN
 static struct pid *
 get_children_pid(struct inode *inode, struct pid *pid_prev, loff_t pos)
