@@ -605,6 +605,9 @@ void __bio_clone_fast(struct bio *bio, struct bio *bio_src)
 	bio->bi_write_hint = bio_src->bi_write_hint;
 	bio->bi_iter = bio_src->bi_iter;
 	bio->bi_io_vec = bio_src->bi_io_vec;
+#ifdef CONFIG_BLK_DEV_CRYPT
+	bio->bi_cryptd = bio_src->bi_cryptd;
+#endif
 
 	bio_clone_blkcg_association(bio, bio_src);
 }
@@ -689,6 +692,12 @@ struct bio *bio_clone_bioset(struct bio *bio_src, gfp_t gfp_mask,
 	bio->bi_write_hint	= bio_src->bi_write_hint;
 	bio->bi_iter.bi_sector	= bio_src->bi_iter.bi_sector;
 	bio->bi_iter.bi_size	= bio_src->bi_iter.bi_size;
+#ifdef CONFIG_BLK_DEV_CRYPT
+#ifdef CONFIG_BLK_DEV_CRYPT_DUN
+	bio->bi_iter.bi_dun = bio_src->bi_iter.bi_dun;
+#endif
+	bio->bi_cryptd		= bio_src->bi_cryptd;
+#endif
 
 	switch (bio_op(bio)) {
 	case REQ_OP_DISCARD:
@@ -1015,6 +1024,25 @@ int submit_bio_wait(struct bio *bio)
 	return ret.error;
 }
 EXPORT_SYMBOL(submit_bio_wait);
+
+static void submit_bio_nowait_endio(struct bio *bio)
+{
+	bio_put(bio);
+}
+
+/**
+ * submit_bio_nowait - submit a bio for fire-and-forget
+ * @bio: The &struct bio which describes the I/O
+ *
+ * Simple wrapper around submit_bio() that takes care of bio_put() on completion
+ */
+void submit_bio_nowait(struct bio *bio)
+{
+	bio->bi_end_io = submit_bio_nowait_endio;
+	bio->bi_opf |= REQ_SYNC;
+	submit_bio(bio);
+}
+EXPORT_SYMBOL(submit_bio_nowait);
 
 /**
  * bio_advance - increment/complete a bio by some number of bytes
