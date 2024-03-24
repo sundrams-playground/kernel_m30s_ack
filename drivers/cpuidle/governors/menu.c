@@ -185,7 +185,7 @@ static inline int performance_multiplier(unsigned long nr_iowaiters, unsigned lo
 	/* mult += 2 * get_loadavg(); */
 
 	/* for IO wait tasks (per cpu!) we add 5x each */
-	mult += 10 * nr_iowaiters;
+	mult += 8 * nr_iowaiters;
 
 	return mult;
 }
@@ -353,6 +353,10 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 	 */
 	data->predicted_us = min(data->predicted_us, expected_interval);
 
+	/* The criterion for shallower idle selection is using C2 idle residency.
+	 * But in Exynos SOC, the C2 Target residency is less than TICk USEC.
+	 * So the shallower idle selection has some malfunction in NFR
+	 */
 	if (tick_nohz_tick_stopped()) {
 		/*
 		 * If the tick is already stopped, the cost of possible short
@@ -435,8 +439,8 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 	 * Don't stop the tick if the selected state is a polling one or if the
 	 * expected idle duration is shorter than the tick period length.
 	 */
-	if (((drv->states[idx].flags & CPUIDLE_FLAG_POLLING) ||
-	     expected_interval < TICK_USEC) && !tick_nohz_tick_stopped()) {
+	if ((drv->states[idx].flags & CPUIDLE_FLAG_POLLING) ||
+	    expected_interval < drv->states[1].target_residency) {
 		unsigned int delta_next_us = ktime_to_us(delta_next);
 
 		*stop_tick = false;
@@ -462,6 +466,10 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 
 out:
 	data->last_state_idx = idx;
+
+	/* Re-evaluating the tick_stop for preserving the power and performance */
+	if (idx == 0 && data->predicted_us > TICK_USEC && *stop_tick == true)
+		*stop_tick = false;
 
 	return data->last_state_idx;
 }

@@ -37,6 +37,21 @@
 
 #include <uapi/linux/dma-buf.h>
 
+#include "dma-buf-container.h"
+#include "dma-buf-trace.h"
+
+static struct kmem_cache *kmem_attach_pool;
+static struct kmem_cache *kmem_dma_buf_pool;
+
+void __init init_dma_buf_kmem_pool(void)
+{
+	kmem_attach_pool = KMEM_CACHE(dma_buf_attachment, SLAB_HWCACHE_ALIGN | SLAB_PANIC);
+	kmem_dma_buf_pool = kmem_cache_create("dma_buf",
+		(sizeof(struct dma_buf) + sizeof(struct reservation_object)),
+		(sizeof(struct dma_buf) + sizeof(struct reservation_object)),
+		SLAB_HWCACHE_ALIGN | SLAB_PANIC, NULL);
+}
+
 static inline int is_dma_buf_file(struct file *);
 
 struct dma_buf_list {
@@ -73,11 +88,17 @@ static int dma_buf_release(struct inode *inode, struct file *file)
 	list_del(&dmabuf->list_node);
 	mutex_unlock(&db_list.lock);
 
+	dmabuf_trace_free(dmabuf);
+
 	if (dmabuf->resv == (struct reservation_object *)&dmabuf[1])
 		reservation_object_fini(dmabuf->resv);
 
 	module_put(dmabuf->owner);
-	kfree(dmabuf);
+	kfree(dmabuf->exp_name);
+	if (dmabuf->from_kmem)
+		kmem_cache_free(kmem_dma_buf_pool, dmabuf);
+	else
+		kfree(dmabuf);
 	return 0;
 }
 
@@ -314,6 +335,19 @@ static long dma_buf_ioctl(struct file *file,
 			ret = dma_buf_begin_cpu_access(dmabuf, direction);
 
 		return ret;
+#ifdef CONFIG_COMPAT
+	case DMA_BUF_COMPAT_IOCTL_MERGE:
+#endif
+	case DMA_BUF_IOCTL_MERGE:
+		return dma_buf_merge_ioctl(dmabuf, cmd, arg);
+	case DMA_BUF_IOCTL_CONTAINER_SET_MASK:
+		return dmabuf_container_set_mask_user(dmabuf, arg);
+	case DMA_BUF_IOCTL_CONTAINER_GET_MASK:
+		return dmabuf_container_get_mask_user(dmabuf, arg);
+	case DMA_BUF_IOCTL_TRACK:
+		return dmabuf_trace_track_buffer(dmabuf);
+	case DMA_BUF_IOCTL_UNTRACK:
+		return dmabuf_trace_untrack_buffer(dmabuf);
 	default:
 		return -ENOTTY;
 	}
@@ -337,6 +371,8 @@ static inline int is_dma_buf_file(struct file *file)
 {
 	return file->f_op == &dma_buf_fops;
 }
+
+#define MAX_EXP_FILE_NAME (DNAME_INLINE_LEN - 7) /* 7: strlen("dmabuf_") */
 
 /**
  * DOC: dma buf device access
@@ -392,7 +428,9 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
 	struct reservation_object *resv = exp_info->resv;
 	struct file *file;
 	size_t alloc_size = sizeof(struct dma_buf);
+	char filename[MAX_EXP_FILE_NAME];
 	int ret;
+	bool from_kmem;
 
 	if (!exp_info->resv)
 		alloc_size += sizeof(struct reservation_object);
@@ -414,16 +452,32 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
 	if (!try_module_get(exp_info->owner))
 		return ERR_PTR(-ENOENT);
 
-	dmabuf = kzalloc(alloc_size, GFP_KERNEL);
+	from_kmem = (alloc_size ==
+		     (sizeof(struct dma_buf) + sizeof(struct reservation_object)));
+
+	if (from_kmem) {
+		dmabuf = kmem_cache_zalloc(kmem_dma_buf_pool, GFP_KERNEL);
+		dmabuf->from_kmem = true;
+	} else {
+		dmabuf = kzalloc(alloc_size, GFP_KERNEL);
+	}
+
 	if (!dmabuf) {
 		ret = -ENOMEM;
 		goto err_module;
 	}
 
+	dmabuf->exp_name = kstrdup(exp_info->exp_name, GFP_KERNEL);
+	if (!dmabuf->exp_name) {
+		ret = -ENOMEM;
+		goto err_expname;
+	}
+
+	snprintf(filename, MAX_EXP_FILE_NAME, "dmabuf_%s", dmabuf->exp_name);
+
 	dmabuf->priv = exp_info->priv;
 	dmabuf->ops = exp_info->ops;
 	dmabuf->size = exp_info->size;
-	dmabuf->exp_name = exp_info->exp_name;
 	dmabuf->owner = exp_info->owner;
 	init_waitqueue_head(&dmabuf->poll);
 	dmabuf->cb_excl.poll = dmabuf->cb_shared.poll = &dmabuf->poll;
@@ -435,12 +489,16 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
 	}
 	dmabuf->resv = resv;
 
-	file = anon_inode_getfile("dmabuf", &dma_buf_fops, dmabuf,
+	file = anon_inode_getfile(filename, &dma_buf_fops, dmabuf,
 					exp_info->flags);
 	if (IS_ERR(file)) {
 		ret = PTR_ERR(file);
 		goto err_dmabuf;
 	}
+
+	ret = dmabuf_trace_alloc(dmabuf);
+	if (ret)
+		goto err_file;
 
 	file->f_mode |= FMODE_LSEEK;
 	dmabuf->file = file;
@@ -454,8 +512,15 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
 
 	return dmabuf;
 
+err_file:
+	fput(file);
 err_dmabuf:
-	kfree(dmabuf);
+	kfree(dmabuf->exp_name);
+err_expname:
+	if (from_kmem)
+		kmem_cache_free(kmem_dma_buf_pool, dmabuf);
+	else
+		kfree(dmabuf);
 err_module:
 	module_put(exp_info->owner);
 	return ERR_PTR(ret);
@@ -558,8 +623,8 @@ struct dma_buf_attachment *dma_buf_attach(struct dma_buf *dmabuf,
 	if (WARN_ON(!dmabuf || !dev))
 		return ERR_PTR(-EINVAL);
 
-	attach = kzalloc(sizeof(*attach), GFP_KERNEL);
-	if (!attach)
+	attach = kmem_cache_zalloc(kmem_attach_pool, GFP_KERNEL);
+	if (attach == NULL)
 		return ERR_PTR(-ENOMEM);
 
 	attach->dev = dev;
@@ -578,7 +643,7 @@ struct dma_buf_attachment *dma_buf_attach(struct dma_buf *dmabuf,
 	return attach;
 
 err_attach:
-	kfree(attach);
+	kmem_cache_free(kmem_attach_pool, attach);
 	mutex_unlock(&dmabuf->lock);
 	return ERR_PTR(ret);
 }
@@ -603,9 +668,79 @@ void dma_buf_detach(struct dma_buf *dmabuf, struct dma_buf_attachment *attach)
 		dmabuf->ops->detach(dmabuf, attach);
 
 	mutex_unlock(&dmabuf->lock);
-	kfree(attach);
+	kmem_cache_free(kmem_attach_pool, attach);
 }
 EXPORT_SYMBOL_GPL(dma_buf_detach);
+
+/**
+ * dma_buf_map_attachment_area - Returns the scatterlist table of
+ * the attachment mapped into _device_ address space.
+ * Is a wrapper for map_dma_buf_area() of the dma_buf_ops.
+ *
+ * @attach:	[in]	attachment whose scatterlist is to be returned
+ * @direction:	[in]	direction of DMA transfer
+ * @size:       [in]    the hint for the exporter
+ *
+ * Returns sg_table containing the scatterlist to be returned; returns ERR_PTR
+ * on error. May return -EINTR if it is interrupted by a signal.
+ *
+ * This passes the size as hint. The exporter can use this size to map or manage
+ * cache maintenance for DMA. However the exporter must ensure that scatterlist
+ * or manage device virtual address space even if pair of [un]map_dma_buf and
+ * [un]map_dma_buf_area doesn't match each other, that is, the sg_table from
+ * map_dma_buf_area could be relased by unmap_dma_buf or the sg_table from
+ * map_dma_buf could be released by unmap_dma_buf_area.
+ */
+struct sg_table *dma_buf_map_attachment_area(struct dma_buf_attachment *attach,
+					     enum dma_data_direction direction,
+					     size_t size)
+{
+	struct sg_table *sg_table;
+
+	if (!attach->dmabuf->ops->map_dma_buf_area)
+		return dma_buf_map_attachment(attach, direction);
+
+	might_sleep();
+
+	if (WARN_ON(!attach || !attach->dmabuf))
+		return ERR_PTR(-EINVAL);
+
+	sg_table = attach->dmabuf->ops->map_dma_buf_area(attach, direction,
+							 size);
+	if (!sg_table)
+		sg_table = ERR_PTR(-ENOMEM);
+
+	return sg_table;
+}
+EXPORT_SYMBOL_GPL(dma_buf_map_attachment_area);
+
+/**
+ * dma_buf_unmap_attachment_area - unmaps and decreases usecount of the buffer
+ * might deallocate the scatterlist associated by requested size.
+ * Is a wrapper for unmap_dma_buf_area() of dma_buf_ops.
+ *
+ * @attach:	[in]	attachment to unmap buffer from
+ * @sg_table:	[in]	scatterlist info of the buffer to unmap
+ * @direction:  [in]    direction of DMA transfer
+ * @size:       [in]    the hint for the exporter
+ */
+void dma_buf_unmap_attachment_area(struct dma_buf_attachment *attach,
+				   struct sg_table *sg_table,
+				   enum dma_data_direction direction,
+				   size_t size)
+{
+	if (!attach->dmabuf->ops->unmap_dma_buf_area)
+		return dma_buf_unmap_attachment(attach, sg_table, direction);
+
+	might_sleep();
+
+	if (WARN_ON(!attach || !attach->dmabuf || !sg_table))
+		return;
+
+	attach->dmabuf->ops->unmap_dma_buf_area(attach, sg_table,
+						   direction, size);
+}
+EXPORT_SYMBOL_GPL(dma_buf_unmap_attachment_area);
 
 /**
  * dma_buf_map_attachment - Returns the scatterlist table of the attachment;
@@ -947,9 +1082,6 @@ EXPORT_SYMBOL_GPL(dma_buf_kunmap);
 int dma_buf_mmap(struct dma_buf *dmabuf, struct vm_area_struct *vma,
 		 unsigned long pgoff)
 {
-	struct file *oldfile;
-	int ret;
-
 	if (WARN_ON(!dmabuf || !vma))
 		return -EINVAL;
 
@@ -963,22 +1095,11 @@ int dma_buf_mmap(struct dma_buf *dmabuf, struct vm_area_struct *vma,
 		return -EINVAL;
 
 	/* readjust the vma */
-	get_file(dmabuf->file);
-	oldfile = vma->vm_file;
-	vma->vm_file = dmabuf->file;
+	fput(vma->vm_file);
+	vma->vm_file = get_file(dmabuf->file);
 	vma->vm_pgoff = pgoff;
 
-	ret = dmabuf->ops->mmap(dmabuf, vma);
-	if (ret) {
-		/* restore old parameters on failure */
-		vma->vm_file = oldfile;
-		fput(dmabuf->file);
-	} else {
-		if (oldfile)
-			fput(oldfile);
-	}
-	return ret;
-
+	return dmabuf->ops->mmap(dmabuf, vma);
 }
 EXPORT_SYMBOL_GPL(dma_buf_mmap);
 
@@ -1153,7 +1274,7 @@ static const struct file_operations dma_buf_debug_fops = {
 	.release        = single_release,
 };
 
-static struct dentry *dma_buf_debugfs_dir;
+struct dentry *dma_buf_debugfs_dir;
 
 static int dma_buf_init_debugfs(void)
 {

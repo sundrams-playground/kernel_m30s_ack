@@ -80,7 +80,7 @@ config CPU_FREQ_DEFAULT_GOV_USERSPACE
 config CPU_FREQ_DEFAULT_GOV_ONDEMAND
 	bool "ondemand"
 	select CPU_FREQ_GOV_ONDEMAND
-	select CPU_FREQ_GOV_PERFORMANCE
+	select CPU_FREQ_GOV_SCHEDUTIL
 	help
 	  Use the CPUFreq governor 'ondemand' as default. This allows
 	  you to get a full dynamic frequency capable system by simply
@@ -92,7 +92,7 @@ config CPU_FREQ_DEFAULT_GOV_ONDEMAND
 config CPU_FREQ_DEFAULT_GOV_CONSERVATIVE
 	bool "conservative"
 	select CPU_FREQ_GOV_CONSERVATIVE
-	select CPU_FREQ_GOV_PERFORMANCE
+	select CPU_FREQ_GOV_SCHEDUTIL
 	help
 	  Use the CPUFreq governor 'conservative' as default. This allows
 	  you to get a full dynamic frequency capable system by simply
@@ -105,9 +105,17 @@ config CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
 	bool "schedutil"
 	depends on SMP
 	select CPU_FREQ_GOV_SCHEDUTIL
-	select CPU_FREQ_GOV_PERFORMANCE
 	help
 	  Use the 'schedutil' CPUFreq governor by default. If unsure,
+	  have a look at the help section of that governor. The fallback
+	  governor will be 'performance'.
+
+config CPU_FREQ_DEFAULT_GOV_ENERGY_ADAPTIVE
+	bool "energy_adaptive"
+	depends on SMP
+	select CPU_FREQ_GOV_ENERGY_ADAPTIVE
+	help
+	  Use the 'energy_adaptive' CPUFreq governor by default. If unsure,
 	  have a look at the help section of that governor. The fallback
 	  governor will be 'performance'.
 
@@ -208,6 +216,51 @@ config CPU_FREQ_GOV_SCHEDUTIL
 	  both cases.
 
 	  If in doubt, say N.
+
+config CPU_FREQ_GOV_ENERGY_ADAPTIVE
+	bool "'energy_adaptive' cpufreq policy governor"
+	depends on CPU_FREQ && SMP && SCHED_EMS
+	select CPU_FREQ_GOV_ATTR_SET
+	select IRQ_WORK
+	select FFSI
+	help
+	  This governor makes decisions based on the utilization data provided
+	  by cpu activated time and the scheduler and infers them to learn based
+	  on given utilization data.
+
+	  If in doubt, say N.
+
+if CPU_FREQ_GOV_ENERGY_ADAPTIVE
+
+config ENERGY_ADAPTIVE_UP_RATE_LIMIT_FAST
+	int "Default up rate-limit for energy_adaptive on fast cluster"
+	default 4000
+	help
+	  This sets energy_adaptive's default frequency up rate-limit for fast cluster in
+	  microseconds.
+
+config ENERGY_ADAPTIVE_DOWN_RATE_LIMIT_FAST
+	int "Default down rate-limit for energy_adaptive on fast cluster"
+	default 8000
+	help
+	  This sets energy_adaptive's default frequency down rate-limit for fast cluster in
+	  microseconds.
+
+config ENERGY_ADAPTIVE_UP_RATE_LIMIT_SLOW
+	int "Default up rate-limit for energy_adaptive on slow cluster"
+	default 4000
+	help
+	  This sets energy_adaptive's default frequency up rate-limit for slow cluster in
+	  microseconds.
+
+config ENERGY_ADAPTIVE_DOWN_RATE_LIMIT_SLOW
+	int "Default down rate-limit for energy_adaptive on slow cluster"
+	default 8000
+	help
+	  This sets energy_adaptive's default frequency down rate-limit for slow cluster in
+	  microseconds.
+
+endif
 
 comment "CPU frequency scaling drivers"
 
@@ -349,6 +402,42 @@ config QORIQ_CPUFREQ
 	help
 	  This adds the CPUFreq driver support for Freescale QorIQ SoCs
 	  which are capable of changing the CPU's frequency dynamically.
+
+comment "P-state Boost Solutions"
+
+choice EXYNOS_PSTATE
+	prompt "P-state Boost Solution"
+	default EXYNOS_PSTATE_DISABLE
+	depends on ARCH_EXYNOS
+	depends on CPU_FREQ
+	help
+	  Default status of P-state boost is disable.
+
+config EXYNOS_PSTATE_DISABLE
+	bool "disable"
+	help
+	  This option sets P-state boost solution as disable.
+	  If in doubt, set this config.
+
+config EXYNOS_PSTATE_HAFM
+	bool "Exynos HAFM"
+	help
+	  This option sets P-state boost solution as HAFM.
+	  The config makes HIU just deliver frequency level and power budget
+	  given from CPUFreq driver and register set.
+
+config EXYNOS_PSTATE_HAFM_TB
+	bool "Exynos HAFM-TB"
+	help
+	  This option sets P-state boost solution as HAFM-TB.
+
+config EXYNOS_PSTATE_MODE_CHANGER
+	bool "Exynos Mode Changer"
+	depends on HOTPLUG_CPU
+	help
+	  This option sets P-state boost solution as EMC.
+
+endchoice
 
 endif
 endmenu
