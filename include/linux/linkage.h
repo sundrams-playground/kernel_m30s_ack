@@ -23,10 +23,8 @@
 #endif
 
 #ifndef cond_syscall
-#define cond_syscall(x)	asm(				\
-	".weak " VMLINUX_SYMBOL_STR(x) "\n\t"		\
-	".set  " VMLINUX_SYMBOL_STR(x) ","		\
-		 VMLINUX_SYMBOL_STR(sys_ni_syscall))
+#define cond_syscall(x) \
+	long __attribute__((weak, alias("sys_ni_syscall"))) x(void);
 #endif
 
 #ifndef SYSCALL_ALIAS
@@ -38,6 +36,22 @@
 
 #define __page_aligned_data	__section(.data..page_aligned) __aligned(PAGE_SIZE)
 #define __page_aligned_bss	__section(.bss..page_aligned) __aligned(PAGE_SIZE)
+
+#ifdef CONFIG_UH_RKP
+#define __page_aligned_rkp_bss		__section(.rkp_bss.page_aligned) __aligned(PAGE_SIZE)
+#define __rkp_ro				__section(.rkp_ro)
+#else
+#define __page_aligned_rkp_bss		__page_aligned_bss
+#define __rkp_ro
+#endif
+
+#ifdef CONFIG_RKP_KDP
+#define __kdp_ro				__section(.kdp_ro)
+#define __lsm_ro_after_init_kdp	__section(.kdp_ro)
+#else
+#define __kdp_ro
+#define __lsm_ro_after_init_kdp __lsm_ro_after_init
+#endif
 
 /*
  * For assembly routines.

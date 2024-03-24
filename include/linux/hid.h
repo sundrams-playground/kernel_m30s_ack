@@ -363,6 +363,7 @@ struct hid_item {
 #define HID_GROUP_RMI				0x0100
 #define HID_GROUP_WACOM				0x0101
 #define HID_GROUP_LOGITECH_DJ_DEVICE		0x0102
+#define HID_GROUP_STEAM				0x0103
 
 /*
  * HID protocol status
@@ -573,6 +574,8 @@ struct hid_device {							/* device report descriptor */
 	struct list_head inputs;					/* The list of inputs */
 	void *hiddev;							/* The hiddev structure */
 	void *hidraw;
+	void *hidovr;
+	void *hidtvr;
 
 	char name[128];							/* Device name */
 	char phys[64];							/* Device physical location */
@@ -803,6 +806,11 @@ static inline bool hid_is_using_ll_driver(struct hid_device *hdev,
 		struct hid_ll_driver *driver)
 {
 	return hdev->ll_driver == driver;
+}
+
+static inline bool hid_is_usb(struct hid_device *hdev)
+{
+	return hid_is_using_ll_driver(hdev, &usb_hid_driver);
 }
 
 #define	PM_HINT_FULLON	1<<5

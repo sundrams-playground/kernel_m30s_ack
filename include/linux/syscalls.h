@@ -901,6 +901,7 @@ asmlinkage long sys_open_by_handle_at(int mountdirfd,
 				      struct file_handle __user *handle,
 				      int flags);
 asmlinkage long sys_setns(int fd, int nstype);
+asmlinkage long sys_pidfd_open(pid_t pid, unsigned int flags);
 asmlinkage long sys_process_vm_readv(pid_t pid,
 				     const struct iovec __user *lvec,
 				     unsigned long liovcnt,
@@ -940,5 +941,24 @@ asmlinkage long sys_pkey_alloc(unsigned long flags, unsigned long init_val);
 asmlinkage long sys_pkey_free(int pkey);
 asmlinkage long sys_statx(int dfd, const char __user *path, unsigned flags,
 			  unsigned mask, struct statx __user *buffer);
+asmlinkage long sys_pidfd_send_signal(int pidfd, int sig,
+				       siginfo_t __user *info,
+				       unsigned int flags);
+
+/*
+ * Kernel code should not call syscalls (i.e., sys_xyzyyz()) directly.
+ * Instead, use one of the functions which work equivalently, such as
+ * the ksys_xyzyyz() functions prototyped below.
+ * Dark-Mattere: about to do top kek retardism
+ */
+#ifdef CONFIG_ADVISE_SYSCALLS
+int ksys_fadvise64_64(int fd, loff_t offset, loff_t len, int advice);
+#else
+static inline int ksys_fadvise64_64(int fd, loff_t offset, loff_t len,
+				    int advice)
+{
+	return -EINVAL;
+}
+#endif
 
 #endif

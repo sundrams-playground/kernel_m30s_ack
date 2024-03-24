@@ -35,6 +35,7 @@
 #include <linux/delayed_call.h>
 #include <linux/uuid.h>
 #include <linux/errseq.h>
+#include <linux/ioprio.h>
 
 #include <asm/byteorder.h>
 #include <uapi/linux/fs.h>
@@ -303,7 +304,8 @@ struct kiocb {
 	void (*ki_complete)(struct kiocb *iocb, long ret, long ret2);
 	void			*private;
 	int			ki_flags;
-	enum rw_hint		ki_hint;
+	u16			ki_hint;
+	u16			ki_ioprio; /* See linux/ioprio.h */
 } __randomize_layout;
 
 static inline bool is_sync_kiocb(struct kiocb *kiocb)
@@ -412,6 +414,9 @@ struct address_space {
 	struct list_head	private_list;	/* for use by the address_space */
 	void			*private_data;	/* ditto */
 	errseq_t		wb_err;
+#if defined(CONFIG_SDP) && !defined(CONFIG_FSCRYPT_SDP)
+	int userid;
+#endif
 } __attribute__((aligned(sizeof(long)))) __randomize_layout;
 	/*
 	 * On most architectures that alignment is already the case; but
@@ -478,6 +483,11 @@ static inline void i_mmap_unlock_write(struct address_space *mapping)
 	up_write(&mapping->i_mmap_rwsem);
 }
 
+static inline int i_mmap_trylock_read(struct address_space *mapping)
+{
+	return down_read_trylock(&mapping->i_mmap_rwsem);
+}
+
 static inline void i_mmap_lock_read(struct address_space *mapping)
 {
 	down_read(&mapping->i_mmap_rwsem);
@@ -498,7 +508,7 @@ static inline int mapping_mapped(struct address_space *mapping)
 
 /*
  * Might pages of this file have been modified in userspace?
- * Note that i_mmap_writable counts all VM_SHARED vmas: do_mmap_pgoff
+ * Note that i_mmap_writable counts all VM_SHARED vmas: do_mmap
  * marks vma as VM_SHARED if it is shared, and the file was opened for
  * writing i.e. vma may be mprotected writable even if now readonly.
  *
@@ -893,8 +903,11 @@ struct file {
 #endif /* #ifdef CONFIG_EPOLL */
 	struct address_space	*f_mapping;
 	errseq_t		f_wb_err;
+#if defined(CONFIG_FIVE_PA_FEATURE) || defined(CONFIG_PROCA)
+	void *f_signature;
+#endif
 } __randomize_layout
-  __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
+  __attribute__((aligned(8)));
 
 struct file_handle {
 	__u32 handle_bytes;
@@ -1475,7 +1488,40 @@ static inline void i_gid_write(struct inode *inode, gid_t gid)
 	inode->i_gid = make_kgid(inode->i_sb->s_user_ns, gid);
 }
 
-extern struct timespec current_time(struct inode *inode);
+/**
+ * current_fs_time - Return FS time
+ * @sb: Superblock.
+ *
+ * Return the current time truncated to the time granularity supported by
+ * the fs.
+ */
+static inline struct timespec current_fs_time(struct super_block *sb)
+{
+	struct timespec now = current_kernel_time();
+	return timespec_trunc(now, sb->s_time_gran);
+}
+
+/**
+ * current_time - Return FS time
+ * @inode: inode.
+ *
+ * Return the current time truncated to the time granularity supported by
+ * the fs.
+ *
+ * Note that inode and inode->sb cannot be NULL.
+ * Otherwise, the function warns and returns time without truncation.
+ */
+static inline struct timespec current_time(struct inode *inode)
+{
+	struct timespec now = current_kernel_time();
+
+	if (unlikely(!inode->i_sb)) {
+		WARN(1, "current_time() called with uninitialized super_block in the inode");
+		return now;
+	}
+
+	return timespec_trunc(now, inode->i_sb->s_time_gran);
+}
 
 /*
  * Snapshotting support.
@@ -1742,6 +1788,7 @@ struct file_operations {
 			u64);
 	ssize_t (*dedupe_file_range)(struct file *, u64, u64, struct file *,
 			u64);
+	int (*fadvise)(struct file *, loff_t, loff_t, int);
 } __randomize_layout;
 
 struct inode_operations {
@@ -1838,6 +1885,7 @@ struct super_operations {
 	void *(*clone_mnt_data) (void *);
 	void (*copy_mnt_data) (void *, void *);
 	void (*umount_begin) (struct super_block *);
+	void (*umount_end) (struct super_block *, int);
 
 	int (*show_options)(struct seq_file *, struct dentry *);
 	int (*show_options2)(struct vfsmount *,struct seq_file *, struct dentry *);
@@ -1937,12 +1985,22 @@ static inline enum rw_hint file_write_hint(struct file *file)
 
 static inline int iocb_flags(struct file *file);
 
+static inline u16 ki_hint_validate(enum rw_hint hint)
+{
+	typeof(((struct kiocb *)0)->ki_hint) max_hint = -1;
+
+	if (hint <= max_hint)
+		return hint;
+	return 0;
+}
+
 static inline void init_sync_kiocb(struct kiocb *kiocb, struct file *filp)
 {
 	*kiocb = (struct kiocb) {
 		.ki_filp = filp,
 		.ki_flags = iocb_flags(filp),
-		.ki_hint = file_write_hint(filp),
+		.ki_hint = ki_hint_validate(file_write_hint(filp)),
+		.ki_ioprio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, 0),
 	};
 }
 
@@ -2208,6 +2266,7 @@ extern int thaw_super(struct super_block *super);
 extern bool our_mnt(struct vfsmount *mnt);
 extern __printf(2, 3)
 int super_setup_bdi_name(struct super_block *sb, char *fmt, ...);
+int sec_super_setup_bdi_name(struct super_block *sb, char *fmt, ...);
 extern int super_setup_bdi(struct super_block *sb);
 
 extern int current_umask(void);
@@ -2712,6 +2771,7 @@ static inline ssize_t generic_write_sync(struct kiocb *iocb, ssize_t count)
 
 extern void emergency_sync(void);
 extern void emergency_remount(void);
+extern int intr_sync(int *);
 #ifdef CONFIG_BLOCK
 extern sector_t bmap(struct inode *, sector_t);
 #endif
@@ -3251,6 +3311,11 @@ static inline int kiocb_set_rw_flags(struct kiocb *ki, rwf_t flags)
 	return 0;
 }
 
+static inline rwf_t iocb_to_rw_flags(int ifl, int iocb_mask)
+{
+	return ifl & iocb_mask;
+}
+
 static inline ino_t parent_ino(struct dentry *dentry)
 {
 	ino_t res;
@@ -3418,5 +3483,23 @@ static inline bool dir_relax_shared(struct inode *inode)
 
 extern bool path_noexec(const struct path *path);
 extern void inode_nohighmem(struct inode *inode);
+
+/* for Android P */
+#define AID_USE_ROOT_RESERVED KGIDT_INIT(5678)
+
+/*
+ * Flush file data before changing attributes.  Caller must hold any locks
+ * required to prevent further writes to this file until we're done setting
+ * flags.
+ */
+static inline int inode_drain_writes(struct inode *inode)
+{
+	inode_dio_wait(inode);
+	return filemap_write_and_wait(inode->i_mapping);
+}
+
+/* mm/fadvise.c */
+extern int vfs_fadvise(struct file *file, loff_t offset, loff_t len,
+		       int advice);
 
 #endif /* _LINUX_FS_H */

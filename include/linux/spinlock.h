@@ -92,12 +92,13 @@
 
 #ifdef CONFIG_DEBUG_SPINLOCK
   extern void __raw_spin_lock_init(raw_spinlock_t *lock, const char *name,
-				   struct lock_class_key *key);
-# define raw_spin_lock_init(lock)				\
-do {								\
-	static struct lock_class_key __key;			\
-								\
-	__raw_spin_lock_init((lock), #lock, &__key);		\
+				   struct lock_class_key *key, short inner);
+
+# define raw_spin_lock_init(lock)					\
+do {									\
+	static struct lock_class_key __key;				\
+									\
+	__raw_spin_lock_init((lock), #lock, &__key, LD_WAIT_SPIN);	\
 } while (0)
 
 #else
@@ -165,6 +166,10 @@ static inline void do_raw_spin_lock(raw_spinlock_t *lock) __acquires(lock)
 	__acquire(lock);
 	arch_spin_lock(&lock->raw_lock);
 }
+
+#ifndef arch_spin_lock_flags
+#define arch_spin_lock_flags(lock, flags)	arch_spin_lock(lock)
+#endif
 
 static inline void
 do_raw_spin_lock_flags(raw_spinlock_t *lock, unsigned long *flags) __acquires(lock)
@@ -279,12 +284,6 @@ static inline void do_raw_spin_unlock(raw_spinlock_t *lock) __releases(lock)
 	1 : ({ local_irq_restore(flags); 0; }); \
 })
 
-/**
- * raw_spin_can_lock - would raw_spin_trylock() succeed?
- * @lock: the spinlock in question.
- */
-#define raw_spin_can_lock(lock)	(!raw_spin_is_locked(lock))
-
 /* Include rwlock functions */
 #include <linux/rwlock.h>
 
@@ -306,11 +305,25 @@ static __always_inline raw_spinlock_t *spinlock_check(spinlock_t *lock)
 	return &lock->rlock;
 }
 
-#define spin_lock_init(_lock)				\
-do {							\
-	spinlock_check(_lock);				\
-	raw_spin_lock_init(&(_lock)->rlock);		\
+#ifdef CONFIG_DEBUG_SPINLOCK
+
+# define spin_lock_init(lock)					\
+do {								\
+	static struct lock_class_key __key;			\
+								\
+	__raw_spin_lock_init(spinlock_check(lock),		\
+			     #lock, &__key, LD_WAIT_CONFIG);	\
 } while (0)
+
+#else
+
+# define spin_lock_init(_lock)			\
+do {						\
+	spinlock_check(_lock);			\
+	*(_lock) = __SPIN_LOCK_UNLOCKED(_lock);	\
+} while (0)
+
+#endif
 
 static __always_inline void spin_lock(spinlock_t *lock)
 {
@@ -397,11 +410,6 @@ static __always_inline int spin_is_contended(spinlock_t *lock)
 	return raw_spin_is_contended(&lock->rlock);
 }
 
-static __always_inline int spin_can_lock(spinlock_t *lock)
-{
-	return raw_spin_can_lock(&lock->rlock);
-}
-
 #define assert_spin_locked(lock)	assert_raw_spin_locked(&(lock)->rlock)
 
 /*
@@ -420,5 +428,10 @@ static __always_inline int spin_can_lock(spinlock_t *lock)
 extern int _atomic_dec_and_lock(atomic_t *atomic, spinlock_t *lock);
 #define atomic_dec_and_lock(atomic, lock) \
 		__cond_lock(lock, _atomic_dec_and_lock(atomic, lock))
+
+extern int _atomic_dec_and_lock_irqsave(atomic_t *atomic, spinlock_t *lock,
+					unsigned long *flags);
+#define atomic_dec_and_lock_irqsave(atomic, lock, flags) \
+		__cond_lock(lock, _atomic_dec_and_lock_irqsave(atomic, lock, &(flags)))
 
 #endif /* __LINUX_SPINLOCK_H */

@@ -27,6 +27,7 @@
 #include <linux/signal_types.h>
 #include <linux/mm_types_task.h>
 #include <linux/task_io_accounting.h>
+#include <linux/sec_debug_types.h>
 
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
@@ -45,6 +46,7 @@ struct pid_namespace;
 struct pipe_inode_info;
 struct rcu_node;
 struct reclaim_state;
+struct capture_control;
 struct robust_list_head;
 struct sched_attr;
 struct sched_param;
@@ -106,10 +108,6 @@ struct task_group;
 #define task_is_stopped(task)		((task->state & __TASK_STOPPED) != 0)
 
 #define task_is_stopped_or_traced(task)	((task->state & (__TASK_STOPPED | __TASK_TRACED)) != 0)
-
-#define task_contributes_to_load(task)	((task->state & TASK_UNINTERRUPTIBLE) != 0 && \
-					 (task->flags & PF_FROZEN) == 0 && \
-					 (task->state & TASK_NOLOAD) == 0)
 
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 
@@ -290,6 +288,18 @@ struct vtime {
 	u64			gtime;
 };
 
+/*
+ * Utilization clamp constraints.
+ * @UCLAMP_MIN:	Minimum utilization
+ * @UCLAMP_MAX:	Maximum utilization
+ * @UCLAMP_CNT:	Utilization clamp constraints count
+ */
+enum uclamp_id {
+	UCLAMP_MIN = 0,
+	UCLAMP_MAX,
+	UCLAMP_CNT
+};
+
 struct sched_info {
 #ifdef CONFIG_SCHED_INFO
 	/* Cumulative counters: */
@@ -320,6 +330,10 @@ struct sched_info {
  */
 # define SCHED_FIXEDPOINT_SHIFT		10
 # define SCHED_FIXEDPOINT_SCALE		(1L << SCHED_FIXEDPOINT_SHIFT)
+
+/* Increase resolution of cpu_capacity calculations */
+# define SCHED_CAPACITY_SHIFT		SCHED_FIXEDPOINT_SHIFT
+# define SCHED_CAPACITY_SCALE		(1L << SCHED_CAPACITY_SHIFT)
 
 struct load_weight {
 	unsigned long			weight;
@@ -352,6 +366,29 @@ struct util_est {
 	unsigned int			enqueued;
 	unsigned int			ewma;
 #define UTIL_EST_WEIGHT_SHIFT		2
+};
+
+#define MLT_HIST_SIZE_MAX	20
+
+struct mlt {
+	bool	running;
+
+	u64	period_start;
+	u64	last_updated;
+	u64	active_sum;
+
+	int	cur_period;
+	int	period[MLT_HIST_SIZE_MAX];
+
+	int	active_ratio_recent;
+	int	active_ratio_avg;
+	int	active_ratio_max;
+	int	active_ratio_est;
+	int	active_ratio_stdev;
+	int	active_ratio_limit;
+
+	u64	last_boost_time;
+	int	active_ratio_boost;
 };
 
 /*
@@ -477,6 +514,13 @@ struct sched_entity {
 	struct cfs_rq			*my_q;
 #endif
 
+#ifdef CONFIG_FAST_TRACK
+	int ftt_mark;
+	int ftt_enqueue_time;
+	atomic64_t ftt_dyn_mark;
+	u64 ftt_vrt_delta;
+#endif
+
 #ifdef CONFIG_SMP
 	/*
 	 * Per entity load average tracking.
@@ -539,6 +583,16 @@ struct sched_rt_entity {
 	/* rq "owned" by this entity/group: */
 	struct rt_rq			*my_q;
 #endif
+
+#ifdef CONFIG_SMP
+	/*
+	 * Per entity load average tracking.
+	 *
+	 * Put into separate cache line so it does not
+	 * collide with read-mostly values above.
+	 */
+	struct sched_avg		avg;// ____cacheline_aligned_in_smp;
+#endif
 } __randomize_layout;
 
 struct sched_dl_entity {
@@ -584,11 +638,15 @@ struct sched_dl_entity {
 	 * has not been executed yet. This flag is useful to avoid race
 	 * conditions between the inactive timer handler and the wakeup
 	 * code.
+	 *
+	 * @dl_overrun tells if the task asked to be informed about runtime
+	 * overruns.
 	 */
-	int				dl_throttled;
-	int				dl_boosted;
-	int				dl_yielded;
-	int				dl_non_contending;
+	unsigned int			dl_throttled      : 1;
+	unsigned int			dl_boosted        : 1;
+	unsigned int			dl_yielded        : 1;
+	unsigned int			dl_non_contending : 1;
+	unsigned int			dl_overrun	  : 1;
 
 	/*
 	 * Bandwidth enforcement timer. Each -deadline task has its
@@ -606,6 +664,42 @@ struct sched_dl_entity {
 	struct hrtimer inactive_timer;
 };
 
+#ifdef CONFIG_UCLAMP_TASK
+/* Number of utilization clamp buckets (shorter alias) */
+#define UCLAMP_BUCKETS CONFIG_UCLAMP_BUCKETS_COUNT
+
+/*
+ * Utilization clamp for a scheduling entity
+ * @value:		clamp value "assigned" to a se
+ * @bucket_id:		bucket index corresponding to the "assigned" value
+ * @active:		the se is currently refcounted in a rq's bucket
+ * @user_defined:	the requested clamp value comes from user-space
+ *
+ * The bucket_id is the index of the clamp bucket matching the clamp value
+ * which is pre-computed and stored to avoid expensive integer divisions from
+ * the fast path.
+ *
+ * The active bit is set whenever a task has got an "effective" value assigned,
+ * which can be different from the clamp value "requested" from user-space.
+ * This allows to know a task is refcounted in the rq's bucket corresponding
+ * to the "effective" bucket_id.
+ *
+ * The user_defined bit is set whenever a task has got a task-specific clamp
+ * value requested from userspace, i.e. the system defaults apply to this task
+ * just as a restriction. This allows to relax default clamps when a less
+ * restrictive task-specific value has been requested, thus allowing to
+ * implement a "nice" semantic. For example, a task running with a 20%
+ * default boost can still drop its own boosting to 0%.
+ */
+struct uclamp_se {
+	unsigned int value		: bits_per(SCHED_CAPACITY_SCALE);
+	unsigned int bucket_id		: bits_per(UCLAMP_BUCKETS);
+	unsigned int active		: 1;
+	unsigned int user_defined	: 1;
+	unsigned int ignore_uclamp_max	: 1;
+};
+#endif /* CONFIG_UCLAMP_TASK */
+
 union rcu_special {
 	struct {
 		u8			blocked;
@@ -617,6 +711,10 @@ union rcu_special {
 	} b; /* Bits. */
 	u32 s; /* Set of bits. */
 };
+
+#ifdef CONFIG_FIVE
+struct task_integrity;
+#endif
 
 enum perf_event_task_context {
 	perf_invalid_context = -1,
@@ -650,6 +748,7 @@ struct task_struct {
 	atomic_t			usage;
 	/* Per task flags (PF_*), defined further below: */
 	unsigned int			flags;
+	unsigned int			pc_flags;
 	unsigned int			ptrace;
 
 #ifdef CONFIG_SMP
@@ -663,6 +762,14 @@ struct task_struct {
 	unsigned long			wakee_flip_decay_ts;
 	struct task_struct		*last_wakee;
 
+	/*
+	 * recent_used_cpu is initially set as the last CPU used by a task
+	 * that wakes affine another task. Waker/wakee relationships can
+	 * push tasks around a CPU where each wakeup moves to the next one.
+	 * Tracking a recently used CPU allows a quick search for a recently
+	 * used CPU that may be idle.
+	 */
+	int				recent_used_cpu;
 	int				wake_cpu;
 #endif
 	int				on_rq;
@@ -685,10 +792,31 @@ struct task_struct {
 	u64 last_sleep_ts;
 #endif
 
+#ifdef CONFIG_SCHED_EMS
+	u64 ems_flags;
+	u64 ems_assigned_cpu;
+
+	u64 ems_qjump_node[4];
+	u64 ems_qjump_queued;
+#endif
+
 #ifdef CONFIG_CGROUP_SCHED
 	struct task_group		*sched_task_group;
 #endif
 	struct sched_dl_entity		dl;
+
+#ifdef CONFIG_UCLAMP_TASK
+	/*
+	 * Clamp values requested for a scheduling entity.
+	 * Must be updated with task_rq_lock() held.
+	 */
+	struct uclamp_se		uclamp_req[UCLAMP_CNT];
+	/*
+	 * Effective clamp values used for a scheduling entity.
+	 * Must be updated with task_rq_lock() held.
+	 */
+	struct uclamp_se		uclamp[UCLAMP_CNT];
+#endif
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	/* List of struct preempt_notifier: */
@@ -701,7 +829,9 @@ struct task_struct {
 
 	unsigned int			policy;
 	int				nr_cpus_allowed;
-	cpumask_t			cpus_allowed;
+	const cpumask_t			*cpus_ptr;
+	cpumask_t			cpus_mask;
+	cpumask_t			cpus_requested;
 
 #ifdef CONFIG_PREEMPT_RCU
 	int				rcu_read_lock_nesting;
@@ -772,12 +902,20 @@ struct task_struct {
 	unsigned			memcg_kmem_skip_account:1;
 #endif
 #endif
+#ifdef CONFIG_LRU_GEN
+	/* whether the LRU algorithm may apply to this access */
+	unsigned			in_lru_fault:1;
+#endif
 #ifdef CONFIG_COMPAT_BRK
 	unsigned			brk_randomized:1;
 #endif
 #ifdef CONFIG_CGROUPS
 	/* disallow userland-initiated cgroup migration */
 	unsigned			no_cgroup_migration:1;
+#endif
+#ifdef CONFIG_PSI
+	/* Stalled due to lack of memory */
+	unsigned			in_memstall:1;
 #endif
 
 	unsigned long			atomic_flags; /* Flags requiring atomic access. */
@@ -940,6 +1078,7 @@ struct task_struct {
 	raw_spinlock_t			pi_lock;
 
 	struct wake_q_node		wake_q;
+	int				wake_q_count;
 
 #ifdef CONFIG_RT_MUTEXES
 	/* PI waiters blocked on a rt_mutex held by this task: */
@@ -957,6 +1096,7 @@ struct task_struct {
 
 #ifdef CONFIG_TRACE_IRQFLAGS
 	unsigned int			irq_events;
+	unsigned int			hardirq_threaded;
 	unsigned long			hardirq_enable_ip;
 	unsigned long			hardirq_disable_ip;
 	unsigned int			hardirq_enable_event;
@@ -969,6 +1109,7 @@ struct task_struct {
 	unsigned int			softirq_enable_event;
 	int				softirqs_enabled;
 	int				softirq_context;
+	int				irq_config;
 #endif
 
 #ifdef CONFIG_LOCKDEP
@@ -1012,6 +1153,9 @@ struct task_struct {
 
 	struct io_context		*io_context;
 
+#ifdef CONFIG_COMPACTION
+	struct capture_control		*capture_control;
+#endif
 	/* Ptrace state: */
 	unsigned long			ptrace_message;
 	siginfo_t			*last_siginfo;
@@ -1213,8 +1357,14 @@ struct task_struct {
 	unsigned int			sequential_io;
 	unsigned int			sequential_io_avg;
 #endif
+#if defined(CONFIG_SDP)
+	unsigned int sensitive;
+#endif
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 	unsigned long			task_state_change;
+#endif
+#ifdef CONFIG_FIVE
+	struct task_integrity		*integrity;
 #endif
 	int				pagefault_disabled;
 #ifdef CONFIG_MMU
@@ -1235,6 +1385,15 @@ struct task_struct {
 	void				*security;
 #endif
 
+	struct {
+		struct work_struct work;
+		atomic_t running;
+		bool free_stack;
+	} async_free;
+
+#ifdef CONFIG_SEC_DEBUG_DTASK
+	struct sec_debug_wait		ssdbg_wait;
+#endif
 	/*
 	 * New fields for task_struct should be added above here, so that
 	 * they are included in the randomized portion of task_struct.
@@ -1451,12 +1610,17 @@ extern struct pid *cad_pid;
 #define PF_KTHREAD		0x00200000	/* I am a kernel thread */
 #define PF_RANDOMIZE		0x00400000	/* Randomize virtual address space */
 #define PF_SWAPWRITE		0x00800000	/* Allowed to write to swap */
-#define PF_MEMSTALL		0x01000000	/* Stalled due to lack of memory */
-#define PF_NO_SETAFFINITY	0x04000000	/* Userland is not allowed to meddle with cpus_allowed */
+#define PF_NO_SETAFFINITY	0x04000000	/* Userland is not allowed to meddle with cpus_mask */
 #define PF_MCE_EARLY		0x08000000      /* Early kill for mce process policy */
 #define PF_MUTEX_TESTER		0x20000000	/* Thread belongs to the rt mutex tester */
 #define PF_FREEZER_SKIP		0x40000000	/* Freezer should not count it as freezable */
 #define PF_SUSPEND_TASK		0x80000000      /* This thread called freeze_processes() and should not be frozen */
+
+/*
+ * Perf critical flags
+ */
+#define PC_LITTLE_AFFINE		0x00000001
+#define PC_PERF_AFFINE			0x00000002
 
 /*
  * Only the _current_ task can read/write to tsk->flags, but other
@@ -1504,6 +1668,7 @@ static inline bool is_percpu_thread(void)
 #define PFA_SPEC_SSB_FORCE_DISABLE	4	/* Speculative Store Bypass force disabled*/
 #define PFA_SPEC_IB_DISABLE		5	/* Indirect branch speculation restricted */
 #define PFA_SPEC_IB_FORCE_DISABLE	6	/* Indirect branch speculation permanently restricted */
+#define PFA_LMK_WAITING			7	/* Lowmemorykiller is waiting */
 
 #define TASK_PFA_TEST(name, func)					\
 	static inline bool task_##func(struct task_struct *p)		\
@@ -1535,6 +1700,9 @@ TASK_PFA_CLEAR(SPEC_SSB_DISABLE, spec_ssb_disable)
 TASK_PFA_TEST(SPEC_SSB_FORCE_DISABLE, spec_ssb_force_disable)
 TASK_PFA_SET(SPEC_SSB_FORCE_DISABLE, spec_ssb_force_disable)
 
+TASK_PFA_TEST(LMK_WAITING, lmk_waiting)
+TASK_PFA_SET(LMK_WAITING, lmk_waiting)
+
 TASK_PFA_TEST(SPEC_IB_DISABLE, spec_ib_disable)
 TASK_PFA_SET(SPEC_IB_DISABLE, spec_ib_disable)
 TASK_PFA_CLEAR(SPEC_IB_DISABLE, spec_ib_disable)
@@ -1565,6 +1733,11 @@ static inline int set_cpus_allowed_ptr(struct task_struct *p, const struct cpuma
 	return 0;
 }
 #endif
+
+void sched_migrate_to_cpumask_start(struct cpumask *old_mask,
+				    const struct cpumask *dest);
+void sched_migrate_to_cpumask_end(const struct cpumask *old_mask,
+				  const struct cpumask *dest);
 
 #ifndef cpu_relax_yield
 #define cpu_relax_yield() cpu_relax()
@@ -1736,10 +1909,22 @@ static inline int _cond_resched(void) { return 0; }
 })
 
 extern int __cond_resched_lock(spinlock_t *lock);
+extern int __cond_resched_rwlock_read(rwlock_t *lock);
+extern int __cond_resched_rwlock_write(rwlock_t *lock);
 
 #define cond_resched_lock(lock) ({				\
 	___might_sleep(__FILE__, __LINE__, PREEMPT_LOCK_OFFSET);\
 	__cond_resched_lock(lock);				\
+})
+
+#define cond_resched_rwlock_read(lock) ({			\
+	__might_sleep(__FILE__, __LINE__, PREEMPT_LOCK_OFFSET);	\
+	__cond_resched_rwlock_read(lock);			\
+})
+
+#define cond_resched_rwlock_write(lock) ({			\
+	__might_sleep(__FILE__, __LINE__, PREEMPT_LOCK_OFFSET);	\
+	__cond_resched_rwlock_write(lock);			\
 })
 
 extern int __cond_resched_softirq(void);
@@ -1772,6 +1957,23 @@ static inline int spin_needbreak(spinlock_t *lock)
 #endif
 }
 
+/*
+ * Check if a rwlock is contended.
+ * Returns non-zero if there is another task waiting on the rwlock.
+ * Returns zero if the lock is not contended or the system / underlying
+ * rwlock implementation does not support contention detection.
+ * Technically does not depend on CONFIG_PREEMPTION, but a general need
+ * for low latency.
+ */
+static inline int rwlock_needbreak(rwlock_t *lock)
+{
+#ifdef CONFIG_PREEMPTION
+	return rwlock_is_contended(lock);
+#else
+	return 0;
+#endif
+}
+
 static __always_inline bool need_resched(void)
 {
 	return unlikely(tif_need_resched());
@@ -1785,9 +1987,9 @@ static __always_inline bool need_resched(void)
 static inline unsigned int task_cpu(const struct task_struct *p)
 {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
-	return p->cpu;
+	return READ_ONCE(p->cpu);
 #else
-	return task_thread_info(p)->cpu;
+	return READ_ONCE(task_thread_info(p)->cpu);
 #endif
 }
 
@@ -1818,6 +2020,7 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int cpu)
 # define vcpu_is_preempted(cpu)	false
 #endif
 
+extern long msm_sched_setaffinity(pid_t pid, struct cpumask *new_mask);
 extern long sched_setaffinity(pid_t pid, const struct cpumask *new_mask);
 extern long sched_getaffinity(pid_t pid, struct cpumask *mask);
 

@@ -90,8 +90,7 @@
  * of extern inline functions at link time.
  * A lot of inline functions can cause havoc with function tracing.
  */
-#if !defined(CONFIG_ARCH_SUPPORTS_OPTIMIZED_INLINING) ||		\
-    !defined(CONFIG_OPTIMIZE_INLINING) || (__GNUC__ < 4)
+#if !defined(CONFIG_OPTIMIZE_INLINING) || (__GNUC__ < 4)
 #define inline \
 	inline __attribute__((always_inline, unused)) notrace __gnu_inline
 #else
@@ -361,6 +360,11 @@
 
 #if !defined(__no_sanitize_address)
 #define __no_sanitize_address
+#endif
+
+#if __GNUC__ >= 5
+/* Avoid reordering a top level statement */
+#define __noreorder    __attribute__((no_reorder))
 #endif
 
 /*

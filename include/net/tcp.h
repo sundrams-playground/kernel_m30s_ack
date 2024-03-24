@@ -228,7 +228,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCP_INIT_CWND		10
 
 /* Bit Flags for sysctl_tcp_fastopen */
-#define	TFO_CLIENT_ENABLE	1
+#define	TFO_CLIENT_ENABLE	3
 #define	TFO_SERVER_ENABLE	2
 #define	TFO_CLIENT_NO_COOKIE	4	/* Data in SYN w/o cookie option */
 
@@ -278,6 +278,7 @@ extern int sysctl_tcp_invalid_ratelimit;
 extern int sysctl_tcp_pacing_ss_ratio;
 extern int sysctl_tcp_pacing_ca_ratio;
 extern int sysctl_tcp_default_init_rwnd;
+extern int sysctl_tcp_proc_sched;
 
 extern atomic_long_t tcp_memory_allocated;
 extern struct percpu_counter tcp_sockets_allocated;
@@ -552,8 +553,6 @@ __u32 cookie_v6_init_sequence(const struct sk_buff *skb, __u16 *mss);
 #endif
 /* tcp_output.c */
 
-u32 tcp_tso_autosize(const struct sock *sk, unsigned int mss_now,
-		     int min_tso_segs);
 void __tcp_push_pending_frames(struct sock *sk, unsigned int cur_mss,
 			       int nonagle);
 int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs);
@@ -837,9 +836,8 @@ struct tcp_skb_cb {
 	union {
 		struct {
 			/* There is space for up to 24 bytes */
-			__u32 in_flight:30,/* Bytes in flight at transmit */
-			      is_app_limited:1, /* cwnd not fully used? */
-			      unused:1;
+			__u32 is_app_limited:1, /* cwnd not fully used? */
+			      unused:31;
 			/* pkts S/ACKed so far upon tx of skb, incl retrans: */
 			__u32 delivered;
 			/* start of send pipeline phase */
@@ -999,6 +997,7 @@ struct rate_sample {
 	u32  prior_in_flight;	/* in flight before this ACK */
 	bool is_app_limited;	/* is sample from packet with bubble in pipe? */
 	bool is_retrans;	/* is sample from retransmission? */
+	bool is_ack_delayed;	/* is this (likely) a delayed ACK? */
 };
 
 struct tcp_congestion_ops {
@@ -1025,8 +1024,8 @@ struct tcp_congestion_ops {
 	u32  (*undo_cwnd)(struct sock *sk);
 	/* hook for packet ack accounting (optional) */
 	void (*pkts_acked)(struct sock *sk, const struct ack_sample *sample);
-	/* suggest number of segments for each skb to transmit (optional) */
-	u32 (*tso_segs_goal)(struct sock *sk);
+	/* override sysctl_tcp_min_tso_segs */
+	u32 (*min_tso_segs)(struct sock *sk);
 	/* returns the multiplier used in tcp_sndbuf_expand (optional) */
 	u32 (*sndbuf_expand)(struct sock *sk);
 	/* call when packets are delivered to update cwnd and pacing rate,
@@ -1233,6 +1232,17 @@ static inline bool tcp_is_cwnd_limited(const struct sock *sk)
 		return tp->snd_cwnd < 2 * tp->max_packets_out;
 
 	return tp->is_cwnd_limited;
+}
+
+/* BBR congestion control needs pacing.
+ * Same remark for SO_MAX_PACING_RATE.
+ * sch_fq packet scheduler is efficiently handling pacing,
+ * but is not always installed/used.
+ * Return true if TCP stack should pace packets itself.
+ */
+static inline bool tcp_needs_internal_pacing(const struct sock *sk)
+{
+	return smp_load_acquire(&sk->sk_pacing_status) == SK_PACING_NEEDED;
 }
 
 /* Something is really bad, we could not queue an additional packet,
@@ -1710,10 +1720,6 @@ static inline struct sk_buff *tcp_rtx_queue_head(const struct sock *sk)
 static inline struct sk_buff *tcp_rtx_queue_tail(const struct sock *sk)
 {
 	struct sk_buff *skb = tcp_send_head(sk);
-
-	/* empty retransmit queue, for example due to zero window */
-	if (skb == tcp_write_queue_head(sk))
-		return NULL;
 
 	return skb ? tcp_write_queue_prev(sk, skb) : tcp_write_queue_tail(sk);
 }

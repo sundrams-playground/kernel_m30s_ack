@@ -41,7 +41,7 @@ struct oom_control {
 	/* Used by oom implementation, do not set */
 	unsigned long totalpages;
 	struct task_struct *chosen;
-	unsigned long chosen_points;
+	long chosen_points;
 };
 
 extern struct mutex oom_lock;
@@ -98,7 +98,7 @@ static inline int check_stable_address_space(struct mm_struct *mm)
 
 void __oom_reap_task_mm(struct mm_struct *mm);
 
-extern unsigned long oom_badness(struct task_struct *p,
+long oom_badness(struct task_struct *p,
 		struct mem_cgroup *memcg, const nodemask_t *nodemask,
 		unsigned long totalpages);
 
@@ -113,9 +113,14 @@ extern bool oom_killer_disable(signed long timeout);
 extern void oom_killer_enable(void);
 
 extern struct task_struct *find_lock_task_mm(struct task_struct *p);
+extern void dump_tasks(struct mem_cgroup *memcg, const nodemask_t *nodemask);
 
 /* sysctls */
 extern int sysctl_oom_dump_tasks;
 extern int sysctl_oom_kill_allocating_task;
 extern int sysctl_panic_on_oom;
+extern int sysctl_reap_mem_on_sigkill;
+
+/* calls for LMK reaper */
+extern void add_to_oom_reaper(struct task_struct *p);
 #endif /* _INCLUDE_LINUX_OOM_H */

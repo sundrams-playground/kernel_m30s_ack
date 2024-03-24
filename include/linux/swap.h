@@ -128,6 +128,10 @@ union swap_header {
  */
 struct reclaim_state {
 	unsigned long reclaimed_slab;
+#ifdef CONFIG_LRU_GEN
+	/* per-thread mm walk data */
+	struct lru_gen_mm_walk *mm_walk;
+#endif
 };
 
 #ifdef __KERNEL__
@@ -171,8 +175,9 @@ enum {
 	SWP_AREA_DISCARD = (1 << 8),	/* single-time swap area discards */
 	SWP_PAGE_DISCARD = (1 << 9),	/* freed swap page-cluster discards */
 	SWP_STABLE_WRITES = (1 << 10),	/* no overwrite PG_writeback pages */
+	SWP_SYNCHRONOUS_IO = (1 << 11),	/* synchronous IO is efficient */
 					/* add others here before... */
-	SWP_SCANNING	= (1 << 11),	/* refcount in scan_swap_map */
+	SWP_SCANNING	= (1 << 12),	/* refcount in scan_swap_map */
 };
 
 #define SWAP_CLUSTER_MAX 32UL
@@ -332,6 +337,7 @@ extern void lru_add_drain_all(void);
 extern void lru_add_drain_all_cpuslocked(void);
 extern void rotate_reclaimable_page(struct page *page);
 extern void deactivate_file_page(struct page *page);
+extern void deactivate_page(struct page *page);
 extern void mark_page_lazyfree(struct page *page);
 extern void swap_setup(void);
 
@@ -395,7 +401,6 @@ int generic_swapfile_activate(struct swap_info_struct *, struct file *,
 #define SWAP_ADDRESS_SPACE_SHIFT	14
 #define SWAP_ADDRESS_SPACE_PAGES	(1 << SWAP_ADDRESS_SPACE_SHIFT)
 extern struct address_space *swapper_spaces[];
-extern bool swap_vma_readahead;
 #define swap_address_space(entry)			    \
 	(&swapper_spaces[swp_type(entry)][swp_offset(entry) \
 		>> SWAP_ADDRESS_SPACE_SHIFT])
@@ -403,9 +408,12 @@ extern unsigned long total_swapcache_pages(void);
 extern void show_swap_cache_info(void);
 extern int add_to_swap(struct page *page);
 extern int add_to_swap_cache(struct page *, swp_entry_t, gfp_t);
-extern int __add_to_swap_cache(struct page *page, swp_entry_t entry);
-extern void __delete_from_swap_cache(struct page *);
+extern int __add_to_swap_cache(struct page *page, swp_entry_t entry,
+			void **shadowp);
+extern void __delete_from_swap_cache(struct page *page, void *shadow);
 extern void delete_from_swap_cache(struct page *);
+extern void clear_shadow_from_swap_cache(int type, unsigned long begin,
+				unsigned long end);
 extern void free_page_and_swap_cache(struct page *);
 extern void free_pages_and_swap_cache(struct page **, int);
 extern struct page *lookup_swap_cache(swp_entry_t entry,
@@ -417,25 +425,16 @@ extern struct page *read_swap_cache_async(swp_entry_t, gfp_t,
 extern struct page *__read_swap_cache_async(swp_entry_t, gfp_t,
 			struct vm_area_struct *vma, unsigned long addr,
 			bool *new_page_allocated);
-extern struct page *swapin_readahead(swp_entry_t, gfp_t,
-			struct vm_area_struct *vma, unsigned long addr);
-
-extern struct page *swap_readahead_detect(struct vm_fault *vmf,
-					  struct vma_swap_readahead *swap_ra);
-extern struct page *do_swap_page_readahead(swp_entry_t fentry, gfp_t gfp_mask,
-					   struct vm_fault *vmf,
-					   struct vma_swap_readahead *swap_ra);
+extern struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t flag,
+				struct vm_fault *vmf);
+extern struct page *swapin_readahead(swp_entry_t entry, gfp_t flag,
+				struct vm_fault *vmf);
 
 /* linux/mm/swapfile.c */
 extern atomic_long_t nr_swap_pages;
 extern long total_swap_pages;
 extern atomic_t nr_rotate_swap;
 extern bool has_usable_swap(void);
-
-static inline bool swap_use_vma_readahead(void)
-{
-	return READ_ONCE(swap_vma_readahead) && !atomic_read(&nr_rotate_swap);
-}
 
 /* Swap 50% full? Release swapcache more aggressively.. */
 static inline bool vm_swap_full(void)
@@ -465,16 +464,30 @@ extern unsigned int count_swap_pages(int, int);
 extern sector_t map_swap_page(struct page *, struct block_device **);
 extern sector_t swapdev_block(int, pgoff_t);
 extern int page_swapcount(struct page *);
+extern int __swap_count(struct swap_info_struct *si, swp_entry_t entry);
 extern int __swp_swapcount(swp_entry_t entry);
 extern int swp_swapcount(swp_entry_t entry);
 extern struct swap_info_struct *page_swap_info(struct page *);
+extern struct swap_info_struct *swp_swap_info(swp_entry_t entry);
 extern bool reuse_swap_page(struct page *, int *);
 extern int try_to_free_swap(struct page *);
 struct backing_dev_info;
 extern int init_swap_address_space(unsigned int type, unsigned long nr_pages);
 extern void exit_swap_address_space(unsigned int type);
+extern unsigned long get_swap_orig_data_nrpages(void);
+extern unsigned long get_swap_comp_pool_nrpages(void);
 
 #else /* CONFIG_SWAP */
+
+static inline int swap_readpage(struct page *page, bool do_poll)
+{
+	return 0;
+}
+
+static inline struct swap_info_struct *swp_swap_info(swp_entry_t entry)
+{
+	return NULL;
+}
 
 #define swap_address_space(entry)		(NULL)
 #define get_nr_swap_pages()			0L
@@ -520,26 +533,14 @@ static inline void put_swap_page(struct page *page, swp_entry_t swp)
 {
 }
 
+static inline struct page *swap_cluster_readahead(swp_entry_t entry,
+				gfp_t gfp_mask, struct vm_fault *vmf)
+{
+	return NULL;
+}
+
 static inline struct page *swapin_readahead(swp_entry_t swp, gfp_t gfp_mask,
-			struct vm_area_struct *vma, unsigned long addr)
-{
-	return NULL;
-}
-
-static inline bool swap_use_vma_readahead(void)
-{
-	return false;
-}
-
-static inline struct page *swap_readahead_detect(
-	struct vm_fault *vmf, struct vma_swap_readahead *swap_ra)
-{
-	return NULL;
-}
-
-static inline struct page *do_swap_page_readahead(
-	swp_entry_t fentry, gfp_t gfp_mask,
-	struct vm_fault *vmf, struct vma_swap_readahead *swap_ra)
+			struct vm_fault *vmf)
 {
 	return NULL;
 }
@@ -567,7 +568,7 @@ static inline int add_to_swap_cache(struct page *page, swp_entry_t entry,
 	return -1;
 }
 
-static inline void __delete_from_swap_cache(struct page *page)
+static inline void __delete_from_swap_cache(struct page *page, void *shadow)
 {
 }
 
@@ -575,7 +576,17 @@ static inline void delete_from_swap_cache(struct page *page)
 {
 }
 
+static inline void clear_shadow_from_swap_cache(int type, unsigned long begin,
+				unsigned long end)
+{
+}
+
 static inline int page_swapcount(struct page *page)
+{
+	return 0;
+}
+
+static inline int __swap_count(struct swap_info_struct *si, swp_entry_t entry)
 {
 	return 0;
 }
@@ -616,7 +627,7 @@ static inline int split_swap_cluster(swp_entry_t entry)
 }
 #endif
 
-#ifdef CONFIG_MEMCG
+#if defined(CONFIG_MEMCG) && !defined(CONFIG_MEMCG_FORCE_USE_VM_SWAPPINESS)
 static inline int mem_cgroup_swappiness(struct mem_cgroup *memcg)
 {
 	/* Cgroup2 doesn't have per-cgroup swappiness */
