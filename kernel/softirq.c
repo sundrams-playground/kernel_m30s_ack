@@ -26,6 +26,11 @@
 #include <linux/smpboot.h>
 #include <linux/tick.h>
 #include <linux/irq.h>
+#include <linux/debug-snapshot.h>
+#include <linux/sched/clock.h>
+#include <linux/nmi.h>
+#include <linux/sched/stat.h>
+#include <linux/sched/clock.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/irq.h>
@@ -77,6 +82,32 @@ static void wakeup_softirqd(void)
 		wake_up_process(tsk);
 }
 
+unsigned int sysctl_softirq_accel_target = 2 * 1000 * 1000; //2ms
+int sysctl_softirq_accel_mask;
+int min_softirq_accel_mask;
+int max_softirq_accel_mask = (1 << NR_SOFTIRQS) - 1;
+static bool need_softirq_accel(struct task_struct *tsk, unsigned long pending)
+{
+#ifdef CONFIG_SCHED_INFO
+	if (tsk && tsk->state == TASK_RUNNING &&
+	    (pending & sysctl_softirq_accel_mask)) {
+		u64 delta = sched_clock_cpu(smp_processor_id());
+
+		if (!sched_info_on() || current == tsk ||
+		    !tsk->sched_info.last_queued ||
+		    delta <= tsk->sched_info.last_queued)
+			return false;
+
+		delta -= tsk->sched_info.last_queued;
+		if (delta >= sysctl_softirq_accel_target) {
+			tsk->sched_info.last_queued += delta;
+			return true;
+		}
+	}
+#endif
+	return false;
+}
+
 /*
  * If ksoftirqd is scheduled, we do not want to process pending softirqs
  * right now. Let ksoftirqd handle this at its own rate, to get fairness,
@@ -88,6 +119,8 @@ static bool ksoftirqd_running(unsigned long pending)
 	struct task_struct *tsk = __this_cpu_read(ksoftirqd);
 
 	if (pending & SOFTIRQ_NOW_MASK)
+		return false;
+	if (sysctl_softirq_accel_mask && need_softirq_accel(tsk, pending))
 		return false;
 	return tsk && (tsk->state == TASK_RUNNING);
 }
@@ -246,6 +279,7 @@ asmlinkage __visible void __softirq_entry __do_softirq(void)
 {
 	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
 	unsigned long old_flags = current->flags;
+	unsigned long long start_time;
 	int max_restart = MAX_SOFTIRQ_RESTART;
 	struct softirq_action *h;
 	bool in_hardirq;
@@ -285,7 +319,12 @@ restart:
 		kstat_incr_softirqs_this_cpu(vec_nr);
 
 		trace_softirq_entry(vec_nr);
+		dbg_snapshot_irq_var(start_time);
+		dbg_snapshot_irq(DSS_FLAG_SOFTIRQ, h->action, NULL, 0, DSS_FLAG_IN);
+		sl_softirq_entry(softirq_to_name[vec_nr], h->action);
 		h->action(h);
+		sl_softirq_exit();
+		dbg_snapshot_irq(DSS_FLAG_SOFTIRQ, h->action, NULL, start_time, DSS_FLAG_OUT);
 		trace_softirq_exit(vec_nr);
 		if (unlikely(prev_count != preempt_count())) {
 			pr_err("huh, entered softirq %u %s %p with preempt_count %08x, exited with %08x?\n",
@@ -493,6 +532,7 @@ EXPORT_SYMBOL(__tasklet_hi_schedule);
 static __latent_entropy void tasklet_action(struct softirq_action *a)
 {
 	struct tasklet_struct *list;
+	unsigned long long start_time;
 
 	local_irq_disable();
 	list = __this_cpu_read(tasklet_vec.head);
@@ -510,7 +550,14 @@ static __latent_entropy void tasklet_action(struct softirq_action *a)
 				if (!test_and_clear_bit(TASKLET_STATE_SCHED,
 							&t->state))
 					BUG();
+				dbg_snapshot_irq_var(start_time);
+				dbg_snapshot_irq(DSS_FLAG_SOFTIRQ_TASKLET,
+						t->func, NULL, 0, DSS_FLAG_IN);
+				sl_softirq_entry(softirq_to_name[TASKLET_SOFTIRQ], t->func);
 				t->func(t->data);
+				sl_softirq_exit();
+				dbg_snapshot_irq(DSS_FLAG_SOFTIRQ_TASKLET,
+						t->func, NULL, start_time, DSS_FLAG_OUT);
 				tasklet_unlock(t);
 				continue;
 			}
@@ -529,6 +576,7 @@ static __latent_entropy void tasklet_action(struct softirq_action *a)
 static __latent_entropy void tasklet_hi_action(struct softirq_action *a)
 {
 	struct tasklet_struct *list;
+	unsigned long long start_time;
 
 	local_irq_disable();
 	list = __this_cpu_read(tasklet_hi_vec.head);
@@ -546,7 +594,14 @@ static __latent_entropy void tasklet_hi_action(struct softirq_action *a)
 				if (!test_and_clear_bit(TASKLET_STATE_SCHED,
 							&t->state))
 					BUG();
+				dbg_snapshot_irq_var(start_time);
+				dbg_snapshot_irq(DSS_FLAG_SOFTIRQ_HI_TASKLET,
+						t->func, NULL, 0, DSS_FLAG_IN);
+				sl_softirq_entry(softirq_to_name[HI_SOFTIRQ], t->func);
 				t->func(t->data);
+				sl_softirq_exit();
+				dbg_snapshot_irq(DSS_FLAG_SOFTIRQ_HI_TASKLET,
+						t->func, NULL, start_time, DSS_FLAG_OUT);
 				tasklet_unlock(t);
 				continue;
 			}
