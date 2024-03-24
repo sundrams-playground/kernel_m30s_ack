@@ -52,6 +52,18 @@
 	.endm
 
 /*
+ * Save/disable and restore interrupts.
+ */
+	.macro	save_and_disable_irqs, olddaif
+	mrs	\olddaif, daif
+	disable_irq
+	.endm
+
+	.macro	restore_irqs, olddaif
+	msr	daif, \olddaif
+	.endm
+
+/*
  * Enable and disable debug exceptions.
  */
 	.macro	disable_dbg
@@ -437,6 +449,7 @@ alternative_endif
 	.endm
 
 /*
+ * Deprecated! Use SYM_FUNC_{START,START_WEAK,END}_PI instead.
  * Annotate a function as position independent, i.e., safe to be called before
  * the kernel virtual mapping is activated.
  */

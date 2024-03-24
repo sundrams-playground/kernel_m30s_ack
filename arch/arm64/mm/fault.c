@@ -32,6 +32,7 @@
 #include <linux/perf_event.h>
 #include <linux/preempt.h>
 #include <linux/hugetlb.h>
+#include <linux/debug-snapshot.h>
 
 #include <asm/bug.h>
 #include <asm/cmpxchg.h>
@@ -46,6 +47,10 @@
 
 #include <acpi/ghes.h>
 
+#ifdef CONFIG_SEC_DEBUG
+#include <linux/sec_debug.h>
+#endif
+
 struct fault_info {
 	int	(*fn)(unsigned long addr, unsigned int esr,
 		      struct pt_regs *regs);
@@ -55,6 +60,10 @@ struct fault_info {
 };
 
 static const struct fault_info fault_info[];
+
+#ifdef CONFIG_SEC_DEBUG_AVOID_UNNECESSARY_TRAP
+unsigned long long incorrect_addr = 0;
+#endif
 
 static inline const struct fault_info *esr_to_fault_info(unsigned int esr)
 {
@@ -126,13 +135,25 @@ static void mem_abort_decode(unsigned int esr)
 		data_abort_decode(esr);
 }
 
+static inline phys_addr_t show_virt_to_phys(unsigned long addr)
+{
+	if (!is_vmalloc_addr((void *)addr) ||
+		(addr >= (unsigned long) KERNEL_START &&
+		 addr <= (unsigned long) KERNEL_END))
+		return __pa(addr);
+	else
+		return page_to_phys(vmalloc_to_page((void *)addr)) +
+		       offset_in_page(addr);
+}
+
 /*
  * Dump out the page tables associated with 'addr' in the currently active mm.
  */
 void show_pte(unsigned long addr)
 {
 	struct mm_struct *mm;
-	pgd_t *pgd;
+	pgd_t *pgdp;
+	pgd_t pgd;
 
 	if (addr < TASK_SIZE) {
 		/* TTBR0 */
@@ -151,33 +172,37 @@ void show_pte(unsigned long addr)
 		return;
 	}
 
-	pr_alert("%s pgtable: %luk pages, %u-bit VAs, pgd = %p\n",
+	pr_alert("%s pgtable: %luk pages, %u-bit VAs, pgdp = %p\n",
 		 mm == &init_mm ? "swapper" : "user", PAGE_SIZE / SZ_1K,
 		 VA_BITS, mm->pgd);
-	pgd = pgd_offset(mm, addr);
-	pr_alert("[%016lx] *pgd=%016llx", addr, pgd_val(*pgd));
+	pgdp = pgd_offset(mm, addr);
+	pgd = READ_ONCE(*pgdp);
+	pr_alert("[%016lx] pgd=%016llx", addr, pgd_val(pgd));
 
 	do {
-		pud_t *pud;
-		pmd_t *pmd;
-		pte_t *pte;
+		pud_t *pudp, pud;
+		pmd_t *pmdp, pmd;
+		pte_t *ptep, pte;
 
-		if (pgd_none(*pgd) || pgd_bad(*pgd))
+		if (pgd_none(pgd) || pgd_bad(pgd))
 			break;
 
-		pud = pud_offset(pgd, addr);
-		pr_cont(", *pud=%016llx", pud_val(*pud));
-		if (pud_none(*pud) || pud_bad(*pud))
+		pudp = pud_offset(pgdp, addr);
+		pud = READ_ONCE(*pudp);
+		pr_cont(", pud=%016llx", pud_val(pud));
+		if (pud_none(pud) || pud_bad(pud))
 			break;
 
-		pmd = pmd_offset(pud, addr);
-		pr_cont(", *pmd=%016llx", pmd_val(*pmd));
-		if (pmd_none(*pmd) || pmd_bad(*pmd))
+		pmdp = pmd_offset(pudp, addr);
+		pmd = READ_ONCE(*pmdp);
+		pr_cont(", pmd=%016llx", pmd_val(pmd));
+		if (pmd_none(pmd) || pmd_bad(pmd))
 			break;
 
-		pte = pte_offset_map(pmd, addr);
-		pr_cont(", *pte=%016llx", pte_val(*pte));
-		pte_unmap(pte);
+		ptep = pte_offset_map(pmdp, addr);
+		pte = READ_ONCE(*ptep);
+		pr_cont(", pte=%016llx", pte_val(pte));
+		pte_unmap(ptep);
 	} while(0);
 
 	pr_cont("\n");
@@ -198,8 +223,9 @@ int ptep_set_access_flags(struct vm_area_struct *vma,
 			  pte_t entry, int dirty)
 {
 	pteval_t old_pteval, pteval;
+	pte_t pte = READ_ONCE(*ptep);
 
-	if (pte_same(*ptep, entry))
+	if (pte_same(pte, entry))
 		return 0;
 
 	/* only preserve the access flags and write permission */
@@ -212,7 +238,7 @@ int ptep_set_access_flags(struct vm_area_struct *vma,
 	 * (calculated as: a & b == ~(~a | ~b)).
 	 */
 	pte_val(entry) ^= PTE_RDONLY;
-	pteval = READ_ONCE(pte_val(*ptep));
+	pteval = pte_val(pte);
 	do {
 		old_pteval = pteval;
 		pteval ^= PTE_RDONLY;
@@ -280,8 +306,12 @@ static void __do_kernel_fault(unsigned long addr, unsigned int esr,
 		msg = "paging request";
 	}
 
-	pr_alert("Unable to handle kernel %s at virtual address %08lx\n", msg,
-		 addr);
+//	if (show_do_kernel_fault_ratelimited())
+		pr_auto(ASL1,"Unable to handle kernel %s at virtual address %08lx\n", msg,
+			 addr);
+#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
+	sec_debug_set_extra_info_fault(KERNEL_FAULT, addr, regs);
+#endif
 
 	mem_abort_decode(esr);
 
@@ -427,8 +457,36 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	}
 
 	if (addr < TASK_SIZE && is_permission_fault(esr, regs, addr)) {
+#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
 		/* regs->orig_addr_limit may be 0 if we entered from EL0 */
-		if (regs->orig_addr_limit == KERNEL_DS)
+		if (regs->orig_addr_limit == KERNEL_DS) {
+			pr_auto(ASL1, "Accessing user space memory(%lx) with fs=KERNEL_DS\n", addr);
+#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
+			sec_debug_set_extra_info_fault(PAGE_FAULT, addr, regs);
+			sec_debug_set_extra_info_esr(esr);
+#endif
+			die("Accessing user space memory with fs=KERNEL_DS", regs, esr);
+		}
+
+		if (is_el1_instruction_abort(esr)) {
+			pr_auto(ASL1, "Attempting to execute userspace memory(%lx)\n", addr);
+#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
+			sec_debug_set_extra_info_fault(PAGE_FAULT, addr, regs);
+			sec_debug_set_extra_info_esr(esr);
+#endif
+			die("Attempting to execute userspace memory", regs, esr);
+		}
+
+		if (!search_exception_tables(regs->pc)) {
+			pr_auto(ASL1, "Accessing user space memory(%lx) outside uaccess.h routines\n", addr);
+#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
+			sec_debug_set_extra_info_fault(PAGE_FAULT, addr, regs);
+			sec_debug_set_extra_info_esr(esr);
+#endif
+			die("Accessing user space memory outside uaccess.h routines", regs, esr);
+		}
+#else
+			if (regs->orig_addr_limit == KERNEL_DS)
 			die("Accessing user space memory with fs=KERNEL_DS", regs, esr);
 
 		if (is_el1_instruction_abort(esr))
@@ -436,6 +494,7 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 
 		if (!search_exception_tables(regs->pc))
 			die("Accessing user space memory outside uaccess.h routines", regs, esr);
+#endif
 	}
 
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
@@ -612,10 +671,14 @@ static int do_sea(unsigned long addr, unsigned int esr, struct pt_regs *regs)
 	const struct fault_info *inf;
 	int ret = 0;
 
-	inf = esr_to_fault_info(esr);
-	pr_err("Synchronous External Abort: %s (0x%08x) at 0x%016lx\n",
-		inf->name, esr, addr);
+#ifdef CONFIG_SEC_DEBUG_AVOID_UNNECESSARY_TRAP
+	incorrect_addr = (unsigned long long)addr;
+#endif
 
+	inf = esr_to_fault_info(esr);
+
+	pr_auto(ASL1, "%s (0x%08x) at 0x%016lx[0x%09llx]\n",
+		      inf->name, esr, addr, show_virt_to_phys(addr));
 	/*
 	 * Synchronous aborts may interrupt code which had interrupts masked.
 	 * Before calling out into the wider kernel tell the interested
@@ -739,8 +802,24 @@ asmlinkage void __exception do_mem_abort(unsigned long addr, unsigned int esr,
 	if (!inf->fn(addr, esr, regs))
 		return;
 
-	pr_alert("Unhandled fault: %s (0x%08x) at 0x%016lx\n",
-		 inf->name, esr, addr);
+	/* Synchronous external abort only */
+	if (!user_mode(regs) || (esr & 63) == 0x10) {
+		if (esr & BIT(10)) {
+			/* FnV = 1, FAR is not valid for custom core */
+			pr_auto(ASL1, "Unhandled fault: %s (0x%08x) at 0x%016lx (PA)\n",
+					inf->name, esr, addr & 0xFFFFFFFFFUL);
+		} else {
+			/* FnV = 0, FAR valid for ARM core */
+			pr_auto(ASL1, "Unhandled fault: %s (0x%08x) at 0x%016lx (VA)\n",
+					inf->name, esr, addr);
+		}
+#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
+		if (!user_mode(regs)) {
+			sec_debug_set_extra_info_fault(MEM_ABORT_FAULT, addr, regs);
+			sec_debug_set_extra_info_esr(esr);
+		}
+#endif
+	}
 
 	mem_abort_decode(esr);
 
@@ -790,11 +869,16 @@ asmlinkage void __exception do_sp_pc_abort(unsigned long addr,
 		local_irq_enable();
 	}
 
-	if (show_unhandled_signals && unhandled_signal(tsk, SIGBUS))
-		pr_info_ratelimited("%s[%d]: %s exception: pc=%p sp=%p\n",
-				    tsk->comm, task_pid_nr(tsk),
+	if (!user_mode(regs) || (unhandled_signal(tsk, SIGBUS) && show_unhandled_signals_ratelimited()))
+		pr_auto(ASL1, "%s exception: pc=%p sp=%p, %s[%d]\n",
 				    esr_get_class_string(esr), (void *)regs->pc,
-				    (void *)regs->sp);
+			(void *)regs->sp, tsk->comm, task_pid_nr(tsk));
+#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
+	if (!user_mode(regs)) {
+		sec_debug_set_extra_info_fault(SP_PC_ABORT_FAULT, addr, regs);
+		sec_debug_set_extra_info_esr(esr);
+	}
+#endif
 
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;

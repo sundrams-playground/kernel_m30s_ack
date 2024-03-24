@@ -12,6 +12,7 @@ config ARM64
 	select ARCH_HAS_DEVMEM_IS_ALLOWED
 	select ARCH_HAS_ACPI_TABLE_UPGRADE if ACPI
 	select ARCH_HAS_ELF_RANDOMIZE
+	select ARCH_HAS_FAST_MULTIPLIER
 	select ARCH_HAS_FORTIFY_SOURCE
 	select ARCH_HAS_GCOV_PROFILE_ALL
 	select ARCH_HAS_GIGANTIC_PAGE if (MEMORY_ISOLATION && COMPACTION) || CMA
@@ -22,10 +23,41 @@ config ARM64
 	select ARCH_HAS_STRICT_MODULE_RWX
 	select ARCH_HAS_TICK_BROADCAST if GENERIC_CLOCKEVENTS_BROADCAST
 	select ARCH_HAVE_NMI_SAFE_CMPXCHG if ACPI_APEI_SEA
+	select ARCH_INLINE_READ_LOCK if !PREEMPT
+	select ARCH_INLINE_READ_LOCK_BH if !PREEMPT
+	select ARCH_INLINE_READ_LOCK_IRQ if !PREEMPT
+	select ARCH_INLINE_READ_LOCK_IRQSAVE if !PREEMPT
+	select ARCH_INLINE_READ_UNLOCK if !PREEMPT
+	select ARCH_INLINE_READ_UNLOCK_BH if !PREEMPT
+	select ARCH_INLINE_READ_UNLOCK_IRQ if !PREEMPT
+	select ARCH_INLINE_READ_UNLOCK_IRQRESTORE if !PREEMPT
+	select ARCH_INLINE_WRITE_LOCK if !PREEMPT
+	select ARCH_INLINE_WRITE_LOCK_BH if !PREEMPT
+	select ARCH_INLINE_WRITE_LOCK_IRQ if !PREEMPT
+	select ARCH_INLINE_WRITE_LOCK_IRQSAVE if !PREEMPT
+	select ARCH_INLINE_WRITE_UNLOCK if !PREEMPT
+	select ARCH_INLINE_WRITE_UNLOCK_BH if !PREEMPT
+	select ARCH_INLINE_WRITE_UNLOCK_IRQ if !PREEMPT
+	select ARCH_INLINE_WRITE_UNLOCK_IRQRESTORE if !PREEMPT
+	select ARCH_INLINE_SPIN_TRYLOCK if !PREEMPT
+	select ARCH_INLINE_SPIN_TRYLOCK_BH if !PREEMPT
+	select ARCH_INLINE_SPIN_LOCK if !PREEMPT
+	select ARCH_INLINE_SPIN_LOCK_BH if !PREEMPT
+	select ARCH_INLINE_SPIN_LOCK_IRQ if !PREEMPT
+	select ARCH_INLINE_SPIN_LOCK_IRQSAVE if !PREEMPT
+	select ARCH_INLINE_SPIN_UNLOCK if !PREEMPT
+	select ARCH_INLINE_SPIN_UNLOCK_BH if !PREEMPT
+	select ARCH_INLINE_SPIN_UNLOCK_IRQ if !PREEMPT
+	select ARCH_INLINE_SPIN_UNLOCK_IRQRESTORE if !PREEMPT
 	select ARCH_USE_CMPXCHG_LOCKREF
+	select ARCH_USE_QUEUED_RWLOCKS
+	select ARCH_USE_QUEUED_SPINLOCKS
 	select ARCH_SUPPORTS_MEMORY_FAILURE
 	select ARCH_SUPPORTS_LTO_CLANG
+	select ARCH_SUPPORTS_THINLTO
+	select ARCH_SUPPORTS_LTO_GCC
 	select ARCH_SUPPORTS_ATOMIC_RMW
+	select ARCH_SUPPORTS_INT128
 	select ARCH_SUPPORTS_NUMA_BALANCING
 	select ARCH_WANT_COMPAT_IPC_PARSE_VERSION
 	select ARCH_WANT_FRAME_POINTERS
@@ -42,9 +74,9 @@ config ARM64
 	select CLONE_BACKWARDS
 	select COMMON_CLK
 	select CPU_PM if (SUSPEND || CPU_IDLE)
+	select CRC32
 	select DCACHE_WORD_ACCESS
 	select EDAC_SUPPORT
-	select FRAME_POINTER
 	select GENERIC_ALLOCATOR
 	select GENERIC_ARCH_TOPOLOGY
 	select GENERIC_CLOCKEVENTS
@@ -52,6 +84,7 @@ config ARM64
 	select GENERIC_CPU_AUTOPROBE
 	select GENERIC_CPU_VULNERABILITIES
 	select GENERIC_EARLY_IOREMAP
+	select GENERIC_FIND_FIRST_BIT
 	select GENERIC_IDLE_POLL_SETUP
 	select GENERIC_IRQ_PROBE
 	select GENERIC_IRQ_SHOW
@@ -64,13 +97,15 @@ config ARM64
 	select GENERIC_TIME_VSYSCALL
 	select HANDLE_DOMAIN_IRQ
 	select HARDIRQS_SW_RESEND
+	select HAVE_MOVE_PMD
+	select HAVE_MOVE_PUD
 	select HAVE_ACPI_APEI if (ACPI && EFI)
 	select HAVE_ALIGNED_STRUCT_PAGE if SLUB
 	select HAVE_ARCH_AUDITSYSCALL
 	select HAVE_ARCH_BITREVERSE
 	select HAVE_ARCH_HUGE_VMAP
 	select HAVE_ARCH_JUMP_LABEL
-	select HAVE_ARCH_KASAN if SPARSEMEM_VMEMMAP && !(ARM64_16K_PAGES && ARM64_VA_BITS_48)
+	select HAVE_ARCH_JUMP_LABEL_RELATIVE
 	select HAVE_ARCH_KGDB
 	select HAVE_ARCH_MMAP_RND_BITS
 	select HAVE_ARCH_MMAP_RND_COMPAT_BITS if COMPAT
@@ -98,15 +133,18 @@ config ARM64
 	select HAVE_GENERIC_DMA_COHERENT
 	select HAVE_HW_BREAKPOINT if PERF_EVENTS
 	select HAVE_IRQ_TIME_ACCOUNTING
+	select HAVE_LD_DEAD_CODE_DATA_ELIMINATION
 	select HAVE_MEMBLOCK
 	select HAVE_MEMBLOCK_NODE_MAP if NUMA
 	select HAVE_NMI if ACPI_APEI_SEA
+	select HAVE_MOVE_PMD
 	select HAVE_PATA_PLATFORM
 	select HAVE_PERF_EVENTS
 	select HAVE_PERF_REGS
 	select HAVE_PERF_USER_STACK_DUMP
 	select HAVE_REGS_AND_STACK_ACCESS_API
-	select HAVE_RCU_TABLE_FREE
+	select HAVE_FUTEX_CMPXCHG if FUTEX
+	select MMU_GATHER_RCU_TABLE_FREE
 	select HAVE_SYSCALL_TRACEPOINTS
 	select HAVE_KPROBES
 	select HAVE_KRETPROBES
@@ -124,6 +162,34 @@ config ARM64
 	select SPARSE_IRQ
 	select SYSCTL_EXCEPTION_TRACE
 	select THREAD_INFO_IN_TASK
+	select ARCH_INLINE_SPIN_TRYLOCK
+	select ARCH_INLINE_SPIN_TRYLOCK_BH
+	select ARCH_INLINE_SPIN_LOCK
+	select ARCH_INLINE_SPIN_LOCK_BH
+	select ARCH_INLINE_SPIN_LOCK_IRQ
+	select ARCH_INLINE_SPIN_LOCK_IRQSAVE
+	select ARCH_INLINE_SPIN_UNLOCK
+	select ARCH_INLINE_SPIN_UNLOCK_BH
+	select ARCH_INLINE_SPIN_UNLOCK_IRQ
+	select ARCH_INLINE_SPIN_UNLOCK_IRQRESTORE
+	select ARCH_INLINE_READ_TRYLOCK
+	select ARCH_INLINE_READ_LOCK
+	select ARCH_INLINE_READ_LOCK_BH
+	select ARCH_INLINE_READ_LOCK_IRQ
+	select ARCH_INLINE_READ_LOCK_IRQSAVE
+	select ARCH_INLINE_READ_UNLOCK
+	select ARCH_INLINE_READ_UNLOCK_BH
+	select ARCH_INLINE_READ_UNLOCK_IRQ
+	select ARCH_INLINE_READ_UNLOCK_IRQRESTORE
+	select ARCH_INLINE_WRITE_TRYLOCK
+	select ARCH_INLINE_WRITE_LOCK
+	select ARCH_INLINE_WRITE_LOCK_BH
+	select ARCH_INLINE_WRITE_LOCK_IRQ
+	select ARCH_INLINE_WRITE_LOCK_IRQSAVE
+	select ARCH_INLINE_WRITE_UNLOCK
+	select ARCH_INLINE_WRITE_UNLOCK_BH
+	select ARCH_INLINE_WRITE_UNLOCK_IRQ
+	select ARCH_INLINE_WRITE_UNLOCK_IRQRESTORE
 	help
 	  ARM 64-bit (AArch64) Linux support.
 
@@ -209,9 +275,6 @@ config GENERIC_CSUM
         def_bool y
 
 config GENERIC_CALIBRATE_DELAY
-	def_bool y
-
-config ZONE_DMA
 	def_bool y
 
 config HAVE_GENERIC_GUP
@@ -435,7 +498,6 @@ config ARM64_ERRATUM_845719
 
 config ARM64_ERRATUM_843419
 	bool "Cortex-A53: 843419: A load or store might access an incorrect address"
-	default y if !LTO_CLANG
 	select ARM64_MODULE_CMODEL_LARGE if MODULES
 	help
 	  This option links the kernel with '--fix-cortex-a53-843419' and
@@ -653,6 +715,20 @@ config NR_CPUS
 	# These have to remain sorted largest to smallest
 	default "64"
 
+config LITTLE_CPU_MASK
+	int "Bitmask of available LITTLE CPUs"
+	help
+	  This is a bitmask specifying which of the CPUs are LITTLE in a
+	  heterogeneous system. Use 0 if you are unsure, which just results in
+	  this storing the bitmask of all available CPUs.
+
+config BIG_CPU_MASK
+	int "Bitmask of available big CPUs"
+	help
+	  This is a bitmask specifying which of the CPUs are big in a
+	  heterogeneous system. Use 0 if you are unsure, which just results in
+	  this storing the bitmask of all available CPUs.
+
 config HOTPLUG_CPU
 	bool "Support for hot-pluggable CPUs"
 	select GENERIC_IRQ_MIGRATION
@@ -730,6 +806,9 @@ config ARCH_WANT_HUGE_PMD_SHARE
 
 config ARCH_HAS_CACHE_LINE_SIZE
 	def_bool y
+
+config ARCH_ENABLE_SPLIT_PMD_PTLOCK
+	def_bool y if PGTABLE_LEVELS > 2
 
 source "mm/Kconfig"
 
@@ -823,7 +902,7 @@ config FORCE_MAX_ZONEORDER
 
 config UNMAP_KERNEL_AT_EL0
 	bool "Unmap kernel when running in userspace (aka \"KAISER\")" if EXPERT
-	default y
+	default n
 	help
 	  Speculation attacks against some high-performance processors can
 	  be used to bypass MMU permission checks and leak kernel data to
@@ -1036,11 +1115,11 @@ config ARM64_MODULE_CMODEL_LARGE
 
 config ARM64_MODULE_PLTS
 	bool
-	select ARM64_MODULE_CMODEL_LARGE
 	select HAVE_MOD_ARCH_SPECIFIC
 
 config RELOCATABLE
 	bool
+	select ARCH_HAS_RELR
 	help
 	  This builds the kernel as a Position Independent Executable (PIE),
 	  which retains all relocation metadata required to relocate the
@@ -1070,12 +1149,12 @@ config RANDOMIZE_BASE
 	  If unsure, say N.
 
 config RANDOMIZE_MODULE_REGION_FULL
-	bool "Randomize the module region independently from the core kernel"
+	bool "Randomize the module region over a 4 GB range"
 	depends on RANDOMIZE_BASE && !LTO_CLANG
 	default y
 	help
-	  Randomizes the location of the module region without considering the
-	  location of the core kernel. This way, it is impossible for modules
+	  Randomizes the location of the module region inside a 4 GB window
+	  covering the core kernel. This way, it is less likely for modules
 	  to leak information about the location of core kernel data structures
 	  but it does imply that function calls between modules and the core
 	  kernel will need to be resolved via veneers in the module PLT.
@@ -1197,6 +1276,85 @@ config BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES
 	  Space separated list of names of dtbs to append when
 	  building a concatenated Image.gz-dtb.
 
+config UH
+	bool "Enable micro hypervisor feature"
+	depends on !SEC_FACTORY
+	default n
+	help
+	  It enables a micro hypervisor.
+	  It's samsung's hypervisor.
+	  RKP and etc can be loaded on it.
+	  please check a memory map for it.
+
+config UH_DEBUG
+    bool "Enable micro hypervisor debug feature"
+	depends on UH
+	default n
+	help
+	  It's for debugging uH.
+
+config UH_RKP
+	bool "Enable RKP (Realtime Kernel Protection) UH feature"
+	depends on UH
+	default n
+	help
+	  it protects a kernel text and etc.
+
+config RKP_KDP
+	bool "Protection for cred structure"
+	depends on !SEC_VTS_TEST
+	depends on UH_RKP
+	default n
+	help
+	  Prevents unauthorized cred modification.
+
+config RKP_NS_PROT
+	bool "Protection for namespace structure"
+	depends on RKP_KDP
+	default n
+	help
+	  Prevents unauthorized namespace modification.
+
+config RKP_DMAP_PROT
+	bool "Page Double Mapping protection"
+	depends on RKP_KDP
+	default n
+	help
+	  Prevents unauthorized mapping for page table.
+
+config RKP_TEST
+	bool "Enable RKP test"
+	depends on UH_RKP && !SAMSUNG_PRODUCT_SHIP
+	default n
+	help
+	  enable RKP test.
+
+config KDP_TEST
+	bool "Enable KDP test"
+	depends on RKP_KDP && RKP_NS_PROT && !SAMSUNG_PRODUCT_SHIP
+	default n
+	help
+	  enable KDP test.
+
+config UH_RKP_FIMC_CHECK
+	bool "Select FIMC type"
+	depends on UH_RKP
+	default n
+	help
+	  it protects a kernel text and etc.
+
+config UH_LKMAUTH
+	bool "Enable LKM authentication by micro hypervisor"
+	depends on MODULES
+	help
+	  micro hypervisor authenticates loaded kernel modules. Disable it if you don't
+	  want CONFIG_UH enabled.
+
+config UH_LKM_BLOCK
+	bool "Block LKM by micro hypervisor"
+	help
+	  LKM is not allowed by Samsung security policy.
+
 endmenu
 
 menu "Userspace binary formats"
@@ -1222,9 +1380,64 @@ config COMPAT
 
 	  If you want to execute 32-bit userspace applications, say Y.
 
+config KUSER_HELPERS
+	bool "Enable the kuser helpers page in 32-bit processes"
+	depends on COMPAT
+	default y
+	help
+	  Warning: disabling this option may break 32-bit applications.
+
+	  Provide kuser helpers in a special purpose fixed-address page. The
+	  kernel provides helper code to userspace in read-only form at a fixed
+	  location to allow userspace to be independent of the CPU type fitted
+	  to the system. This permits 32-bit binaries to be run on ARMv6 through
+	  to ARMv8 without modification.
+
+	  See Documentation/arm/kernel_user_helpers.txt for details.
+
+	  However, the fixed-address nature of these helpers can be used by ROP
+	  (return-orientated programming) authors when creating exploits.
+
+	  If all of the 32-bit binaries and libraries that run on your platform
+	  are built specifically for your platform, and make no use of these
+	  helpers, then you can turn this option off to hinder such exploits.
+	  However, in that case, if a binary or library relying on those helpers
+	  is run, it will receive a SIGSEGV signal, which will terminate the
+	  program. Typically, binaries compiled for ARMv7 or later do not use
+	  the kuser helpers.
+
+	  Say N here only if you are absolutely certain that you do not need
+	  these helpers; otherwise, the safe option is to say Y (the default
+	  for now)
+
 config SYSVIPC_COMPAT
 	def_bool y
 	depends on COMPAT && SYSVIPC
+
+config COMPAT_VDSO
+	bool "32-bit vDSO"
+	depends on COMPAT
+	select ARM_ARCH_TIMER_VCT_ACCESS
+	default n
+	help
+	  Warning: a 32-bit toolchain is necessary to build the vDSO. You
+	  must explicitly define which toolchain should be used by setting
+	  CROSS_COMPILE_ARM32 to the prefix of the 32-bit toolchain (same format
+	  as CROSS_COMPILE). If CROSS_COMPILE_ARM32 is empty, a warning will be
+	  printed and the kernel will be built as if COMPAT_VDSO had not been
+	  set. If CROSS_COMPILE_ARM32 is set to an invalid prefix, compilation
+	  will be aborted.
+
+	  Provide a vDSO to 32-bit processes. It includes the symbols provided
+	  by the vDSO from the 32-bit kernel, so that a 32-bit libc can use
+	  the compat vDSO without modification. It also provides sigreturn
+	  trampolines, replacing the sigreturn page.
+
+config CROSS_COMPILE_ARM32
+	string "32-bit toolchain prefix"
+	help
+	  Same as setting CROSS_COMPILE_ARM32 in the environment, but saved for
+	  future builds. The environment variable overrides this config option.
 
 endmenu
 
@@ -1275,3 +1488,10 @@ source "arch/arm64/crypto/Kconfig"
 endif
 
 source "lib/Kconfig"
+
+config FPSIMD_CORRUPTION_DETECT
+	bool "Detect for fpsimd has corruption"
+	default n
+	help
+	  If FPSIMD has corruption, use this feature for detect problem.
+

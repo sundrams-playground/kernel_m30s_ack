@@ -58,7 +58,7 @@ void copy_to_user_page(struct vm_area_struct *vma, struct page *page,
 	flush_ptrace_access(vma, page, uaddr, dst, len);
 }
 
-void __sync_icache_dcache(pte_t pte, unsigned long addr)
+void __sync_icache_dcache(pte_t pte)
 {
 	struct page *page = pte_page(pte);
 
@@ -82,6 +82,7 @@ EXPORT_SYMBOL(flush_dcache_page);
 /*
  * Additional functions defined in assembly.
  */
+EXPORT_SYMBOL(flush_cache_all);
 EXPORT_SYMBOL(flush_icache_range);
 
 #ifdef CONFIG_ARCH_HAS_PMEM_API

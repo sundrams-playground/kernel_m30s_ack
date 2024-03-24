@@ -23,6 +23,8 @@ LDFLAGS_vmlinux		+= -shared -Bsymbolic -z notext \
 endif
 
 ifeq ($(CONFIG_ARM64_ERRATUM_843419),y)
+KBUILD_CFLAGS	+= $(call cc-option, -mpc-relative-literal-loads)
+
   ifeq ($(call ld-option, --fix-cortex-a53-843419),)
 $(warning ld does not support --fix-cortex-a53-843419; kernel may be susceptible to erratum)
   else
@@ -58,6 +60,39 @@ $(warning Detected assembler with broken .inst; disassembly will be unreliable)
   endif
 endif
 
+ifeq ($(CONFIG_COMPAT_VDSO), y)
+  CROSS_COMPILE_ARM32 ?= $(CONFIG_CROSS_COMPILE_ARM32:"%"=%)
+
+  # Check that the user has provided a valid prefix for the 32-bit toolchain.
+  # To prevent selecting the system $(cc-name) by default, the prefix is not
+  # allowed to be empty, unlike CROSS_COMPILE. In the unlikely event that the
+  # system $(cc-name) is actually the 32-bit ARM compiler to be used, the
+  # variable can be set to the dirname (e.g. CROSS_COMPILE_ARM32=/usr/bin/).
+  # Note: this Makefile is read both before and after regenerating the config
+  # (if needed). Any warning appearing before the config has been regenerated
+  # should be ignored. If the error is triggered and you set
+  # CONFIG_CROSS_COMPILE_ARM32, set CROSS_COMPILE_ARM32 to an appropriate value
+  # when invoking make and fix CONFIG_CROSS_COMPILE_ARM32.
+  ifeq ($(CROSS_COMPILE_ARM32),)
+    $(error CROSS_COMPILE_ARM32 not defined or empty, the compat vDSO will not be built)
+  else ifeq ($(cc-name),clang)
+    export CLANG_TRIPLE_ARM32 ?= $(CROSS_COMPILE_ARM32)
+    export CLANG_TARGET_ARM32 := --target=$(notdir $(CLANG_TRIPLE_ARM32:%-=%))
+    export GCC_TOOLCHAIN32_DIR := $(dir $(shell which $(CROSS_COMPILE_ARM32)ld))
+    export GCC_TOOLCHAIN32 := $(realpath $(GCC_TOOLCHAIN32_DIR)/..)
+    export CLANG_PREFIX32 := --prefix=$(GCC_TOOLCHAIN32_DIR)$(notdir $(CROSS_COMPILE_ARM32))
+    export CLANG_GCC32_TC := --gcc-toolchain=$(GCC_TOOLCHAIN32)
+    export CONFIG_VDSO32 := y
+    vdso32 := -DCONFIG_VDSO32=1
+  else ifeq ($(shell which $(CROSS_COMPILE_ARM32)$(cc-name) 2> /dev/null),)
+    $(error $(CROSS_COMPILE_ARM32)$(cc-name) not found, check CROSS_COMPILE_ARM32)
+  else
+    export CROSS_COMPILE_ARM32
+    export CONFIG_VDSO32 := y
+    vdso32 := -DCONFIG_VDSO32=1
+  endif
+endif
+
 ifeq ($(cc-name),clang)
 # This is a workaround for https://bugs.llvm.org/show_bug.cgi?id=30792.
 # TODO: revert when this is fixed in LLVM.
@@ -65,35 +100,53 @@ KBUILD_CFLAGS	+= -mno-implicit-float
 else
 KBUILD_CFLAGS	+= -mgeneral-regs-only
 endif
-KBUILD_CFLAGS	+= $(lseinstr) $(brokengasinst)
+KBUILD_CFLAGS	+= $(lseinstr) $(brokengasinst) $(vdso32)
+
+#ifdef CONFIG_SOC_EXYNOS9610
+ifeq ($(cc-name),gcc)
+KBUILD_CFLAGS   += -mcpu=cortex-a73.cortex-a53 -mtune=cortex-a73.cortex-a53
+endif
+ifeq ($(cc-name),clang)
+KBUILD_CFLAGS   += -march=armv8-a+crypto+crc+sha2+aes -mtune=cortex-a53 \
+                  -mcpu=cortex-a53+crypto+crc+sha2+aes
+endif
+#endif
+
 KBUILD_CFLAGS	+= -fno-asynchronous-unwind-tables
-KBUILD_CFLAGS	+= $(call cc-option, -mpc-relative-literal-loads)
 KBUILD_CFLAGS	+= -fno-pic
-KBUILD_AFLAGS	+= $(lseinstr) $(brokengasinst)
+KBUILD_CFLAGS	+= $(call cc-disable-warning, psabi)
+KBUILD_AFLAGS	+= $(lseinstr) $(brokengasinst) $(vdso32)
 
 KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
 KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
+
+ifeq ($(cc-name),clang)
+KBUILD_CFLAGS	+= -DCONFIG_ARCH_SUPPORTS_INT128
+else
+KBUILD_CFLAGS	+= $(call cc-ifversion, -ge, 0500, -DCONFIG_ARCH_SUPPORTS_INT128)
+endif
 
 ifeq ($(CONFIG_CPU_BIG_ENDIAN), y)
 KBUILD_CPPFLAGS	+= -mbig-endian
 CHECKFLAGS	+= -D__AARCH64EB__
 AS		+= -EB
-LD		+= -EB
 ifeq ($(ld-name),gold)
-LDFLAGS		+= -maarch64_elf64_be_vec
+LDFLAGS		+= -EB -maarch64_elf64_be_vec
 else
-LDFLAGS		+= -maarch64linuxb
+# Prefer the baremetal ELF build target, but not all toolchains include
+# it so fall back to the standard linux version if needed.
+LDFLAGS		+= -EB $(call ld-option, -maarch64elfb, -maarch64linuxb)
 endif
 UTS_MACHINE	:= aarch64_be
 else
 KBUILD_CPPFLAGS	+= -mlittle-endian
 CHECKFLAGS	+= -D__AARCH64EL__
 AS		+= -EL
-LD		+= -EL
 ifeq ($(ld-name),gold)
-LDFLAGS		+= -maarch64_elf64_le_vec
+LDFLAGS		+= -EL -maarch64_elf64_le_vec
 else
-LDFLAGS		+= -maarch64linux
+# Same as above, prefer ELF but fall back to linux target if needed.
+LDFLAGS		+= -EL $(call ld-option, -maarch64elf, -maarch64linux)
 endif
 UTS_MACHINE	:= aarch64
 endif
@@ -155,7 +208,10 @@ endif
 
 KBUILD_DTBS	:= dtbs
 
-all:	Image.gz $(KBUILD_DTBS) $(subst $\",,$(CONFIG_BUILD_ARM64_APPENDED_KERNEL_IMAGE_NAME))
+KBUILD_DTBO_EXYNOS_IMG := dtbo_exynos.img
+KBUILD_DTB_EXYNOS_IMG := dtb_exynos.img
+
+all:	Image $(KBUILD_DTBS) $(subst $\",,$(CONFIG_BUILD_ARM64_APPENDED_KERNEL_IMAGE_NAME))
 
 
 Image: vmlinux
@@ -168,6 +224,9 @@ zinstall install:
 	$(Q)$(MAKE) $(build)=$(boot) $@
 
 %.dtb: scripts
+	$(Q)$(MAKE) $(build)=$(boot)/dts $(boot)/dts/$@
+
+%.dtbo: scripts
 	$(Q)$(MAKE) $(build)=$(boot)/dts $(boot)/dts/$@
 
 PHONY += dtbs dtbs_install
@@ -183,6 +242,16 @@ Image-dtb: vmlinux scripts dtbs
 
 Image.gz-dtb: vmlinux scripts dtbs Image.gz
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
+
+$(KBUILD_DTBO_EXYNOS_IMG): dtbs
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
+
+all: $(KBUILD_DTBO_EXYNOS_IMG)
+
+$(KBUILD_DTB_EXYNOS_IMG): dtbs
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
+
+all: $(KBUILD_DTB_EXYNOS_IMG)
 
 PHONY += vdso_install
 vdso_install:
@@ -203,6 +272,8 @@ ifeq ($(KBUILD_EXTMOD),)
 prepare: vdso_prepare
 vdso_prepare: prepare0
 	$(Q)$(MAKE) $(build)=arch/arm64/kernel/vdso include/generated/vdso-offsets.h
+	$(if $(CONFIG_VDSO32),$(Q)$(MAKE) $(build)=arch/arm64/kernel/vdso32 \
+					  include/generated/vdso32-offsets.h)
 endif
 
 define archhelp
